@@ -16,6 +16,7 @@
 package software.amazon.smithy.typescript.codegen;
 
 import java.util.Comparator;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
@@ -148,50 +149,46 @@ final class ServiceGenerator implements Runnable {
 
         generateClientDefaults();
 
-        // The default configuration type is always just the base-level
-        // Smithy configuration requirements.
-        writer.write("type $LType = Partial<__SmithyConfiguration<$T>>", configType,
-                applicationProtocol.getOptionsType());
-        writer.write("  & ClientDefaults");
-
-        // Get the configuration symbol types to reference in code. These are
-        // all "&"'d together to create a big configuration type that aggregates
-        // more modular configuration types.
         List<SymbolReference> inputTypes = runtimePlugins.stream()
                 .flatMap(p -> OptionalUtils.stream(p.getInputConfig()))
                 .collect(Collectors.toList());
-
-        if (!inputTypes.isEmpty()) {
-            writer.indent();
-            for (SymbolReference symbolReference : inputTypes) {
-                writer.write("& $T", symbolReference);
-            }
-            writer.dedent();
-        }
-
+        writer.addImport("Intersection", "__Intersection", "@aws-sdk/smithy-client");
         writer.writeDocs(String.format("The configuration interface of %s class constructor that set the region, "
                 + "credentials and other options.", symbol.getName()));
-        writer.write("export interface $1L extends $1LType {}", configType);
+        writer.openBlock("export interface $L extends __Intersection<[", "]> {}", configType, () -> {
+            // The default configuration type is always just the base-level
+            // Smithy configuration requirements.
+            writer.write("Partial<__SmithyConfiguration<$T>>,", applicationProtocol.getOptionsType());
+            writer.write("ClientDefaults$L", inputTypes.isEmpty() ? "" : ",");
+            // Get the configuration symbol types to reference in code. These are
+            // listed to create a big configuration type that aggregates
+            // more modular configuration types. If the same configuration entry
+            // is defined in several modular configuration types, the definition
+            // comes later in the list overwrites the definition populated in
+            // prior configuration types.
+            Iterator<SymbolReference> inputTypesIter = inputTypes.iterator();
+            while (inputTypesIter.hasNext()) {
+                SymbolReference symbolReference = inputTypesIter.next();
+                writer.write("$T$L", symbolReference, inputTypesIter.hasNext() ? "," : "");
+            }
+        });
 
         // Generate the corresponding "Resolved" configuration type to account for
         // each "Input" configuration type.
         writer.write("");
-        writer.write("type $LType = __SmithyResolvedConfiguration<$T>",
-                     resolvedConfigType, applicationProtocol.getOptionsType());
-        writer.write("  & Required<ClientDefaults>");
-
-        if (!inputTypes.isEmpty()) {
-            writer.indent();
-            runtimePlugins.stream()
-                    .flatMap(p -> OptionalUtils.stream(p.getResolvedConfig()))
-                    .forEach(symbol -> writer.write("& $T", symbol));
-            writer.dedent();
-        }
-
         writer.writeDocs(String.format("The resolved configuration interface of %s class. This is resolved and"
                 + " normalized from the {@link %s | constructor configuration interface}.", symbol.getName(),
                         configType));
-        writer.write("export interface $1L extends $1LType {}", resolvedConfigType);
+        writer.openBlock("export interface $L extends __Intersection<[", "]> {}", resolvedConfigType, () -> {
+            writer.write("__SmithyResolvedConfiguration<$T>,", applicationProtocol.getOptionsType());
+            writer.write("Required<ClientDefaults>$L", inputTypes.isEmpty() ? "" : ",");
+            Iterator<SymbolReference> resolvedInputTypesIter = runtimePlugins.stream()
+                            .flatMap(p -> OptionalUtils.stream(p.getResolvedConfig())).iterator();
+            while (resolvedInputTypesIter.hasNext()) {
+                SymbolReference symbolReference = resolvedInputTypesIter.next();
+                writer.write("$T$L", symbolReference, resolvedInputTypesIter.hasNext() ? "," : "");
+            }
+        });
 
         writer.popState();
     }
