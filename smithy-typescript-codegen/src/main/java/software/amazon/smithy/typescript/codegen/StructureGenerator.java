@@ -202,9 +202,9 @@ final class StructureGenerator implements Runnable {
 
     private void renderStructureNamespace(StructuredMemberWriter structuredMemberWriter, boolean includeValidation) {
         Symbol symbol = symbolProvider.toSymbol(shape);
+        writer.writeDocs("@internal");
         writer.openBlock("export namespace $L {", "}", symbol.getName(), () -> {
             String objectParam = "obj";
-            writer.writeDocs("@internal");
             writer.openBlock("export const filterSensitiveLog = ($L: $L): any => ({", "})",
                 objectParam, symbol.getName(),
                 () -> {
@@ -219,7 +219,6 @@ final class StructureGenerator implements Runnable {
             structuredMemberWriter.writeMemberValidatorCache(writer, "memberValidators");
 
             writer.addImport("ValidationFailure", "__ValidationFailure", "@aws-smithy/server-common");
-            writer.writeDocs("@internal");
             List<MemberShape> blobStreamingMembers = getBlobStreamingMembers(model, shape);
             writer.writeInline("export const validate = ($L: ", objectParam);
             if (blobStreamingMembers.isEmpty()) {
