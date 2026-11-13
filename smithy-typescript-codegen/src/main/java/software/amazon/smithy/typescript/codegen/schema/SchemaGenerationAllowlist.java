@@ -1,0 +1,64 @@
+/*
+ * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+package software.amazon.smithy.typescript.codegen.schema;
+
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.Set;
+import software.amazon.smithy.model.shapes.ShapeId;
+import software.amazon.smithy.protocol.traits.Rpcv2CborTrait;
+import software.amazon.smithy.protocol.traits.Rpcv2JsonTrait;
+import software.amazon.smithy.typescript.codegen.TypeScriptSettings;
+import software.amazon.smithy.utils.SmithyInternalApi;
+
+/**
+ *
+ * Controls rollout of schema generation.
+ *
+ */
+@SmithyInternalApi
+public abstract class SchemaGenerationAllowlist {
+
+    private static final Set<ShapeId> ALLOWED = Collections.synchronizedSet(new HashSet<>());
+    private static final Set<ShapeId> PROTOCOLS = Collections.synchronizedSet(new HashSet<>());
+
+    static {
+        ALLOWED.add(ShapeId.from("smithy.protocoltests.rpcv2Cbor#RpcV2Protocol"));
+        ALLOWED.add(ShapeId.from("smithy.protocoltests.rpcv2Json#RpcV2JsonProtocol"));
+        ALLOWED.add(ShapeId.from("org.xyz.v1#XYZService"));
+        PROTOCOLS.add(Rpcv2CborTrait.ID);
+        PROTOCOLS.add(Rpcv2JsonTrait.ID);
+    }
+
+    public static boolean allows(ShapeId serviceShapeId, TypeScriptSettings settings) {
+        if (settings.isTypesOnly()) {
+            return settings.generateSchemas();
+        }
+        if (serviceShapeId == null) {
+            // Outside types mode a service is required to check the allowlist.
+            return false;
+        }
+        boolean generateClient = settings.generateClient();
+        boolean generateServer = settings.generateServerSdk();
+        boolean allowedByProtocol = PROTOCOLS.contains(settings.getProtocol());
+        boolean allowedByName = ALLOWED.contains(serviceShapeId);
+        boolean clientAllowed = generateClient && settings.generateSchemas() && (allowedByProtocol || allowedByName);
+        boolean serverAllowed = generateServer && settings.generateServerSchemas();
+        return clientAllowed || serverAllowed;
+    }
+
+    @Deprecated
+    public static void allow(String serviceShapeId) {
+        ALLOWED.add(ShapeId.from(serviceShapeId));
+    }
+
+    public static void allow(ShapeId serviceShapeId) {
+        ALLOWED.add(serviceShapeId);
+    }
+
+    public static void allowProtocol(ShapeId protocolShapeId) {
+        PROTOCOLS.add(protocolShapeId);
+    }
+}

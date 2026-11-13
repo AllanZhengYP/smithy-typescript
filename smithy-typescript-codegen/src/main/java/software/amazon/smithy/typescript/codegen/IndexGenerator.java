@@ -1,18 +1,7 @@
 /*
- * Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
- *
- * Licensed under the Apache License, Version 2.0 (the "License").
- * You may not use this file except in compliance with the License.
- * A copy of the License is located at
- *
- *  http://aws.amazon.com/apache2.0
- *
- * or in the "license" file accompanying this file. This file is distributed
- * on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either
- * express or implied. See the License for the specific language governing
- * permissions and limitations under the License.
+ * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
  */
-
 package software.amazon.smithy.typescript.codegen;
 
 import java.nio.file.Paths;
@@ -25,8 +14,11 @@ import software.amazon.smithy.model.Model;
 import software.amazon.smithy.model.knowledge.TopDownIndex;
 import software.amazon.smithy.model.shapes.OperationShape;
 import software.amazon.smithy.model.shapes.ServiceShape;
+import software.amazon.smithy.model.traits.DocumentationTrait;
 import software.amazon.smithy.model.traits.PaginatedTrait;
 import software.amazon.smithy.typescript.codegen.integration.ProtocolGenerator;
+import software.amazon.smithy.typescript.codegen.schema.SchemaGenerationAllowlist;
+import software.amazon.smithy.typescript.codegen.validation.ReplaceLast;
 import software.amazon.smithy.utils.SmithyInternalApi;
 import software.amazon.smithy.waiters.WaitableTrait;
 
@@ -43,19 +35,51 @@ final class IndexGenerator {
         Model model,
         SymbolProvider symbolProvider,
         ProtocolGenerator protocolGenerator,
-        TypeScriptWriter writer
+        TypeScriptWriter writer,
+        TypeScriptWriter modelIndexer
     ) {
+        writer.write("/* eslint-disable */");
+        settings
+            .getOptionalService()
+            .map(id -> model.expectShape(id, ServiceShape.class))
+            .flatMap(service -> service.getTrait(DocumentationTrait.class))
+            .ifPresent(trait -> writer.writeDocs(trait.getValue() + "\n\n" + "@packageDocumentation"));
+
         if (settings.generateClient()) {
             writeClientExports(settings, model, symbolProvider, writer);
         }
 
-        if (settings.generateServerSdk() && protocolGenerator != null) {
-            writeProtocolExports(protocolGenerator, writer);
-            writer.write("export * from \"./server/index\";");
+        boolean schemaMode = SchemaGenerationAllowlist.allows(
+            settings.getOptionalService().orElse(null),
+            settings
+        );
+        if (settings.generateServerSdk()) {
+            if (schemaMode) {
+                String serviceName = settings.getService(model).getId().getName();
+                writer.write("export * from \"./server/$LHandler\";", serviceName);
+            } else if (protocolGenerator != null) {
+                writeProtocolExports(protocolGenerator, writer);
+                writer.write("export * from \"./server/index\";");
+            }
+        }
+
+        if (
+            SchemaGenerationAllowlist.allows(
+                settings.getOptionalService().orElse(null),
+                settings
+            )
+        ) {
+            writer.write(
+                """
+                export * from "./schemas/schemas_0";"""
+            );
         }
 
         // write export statement for models
-        writer.write("export * from \"./models\";");
+        writer.write(
+            // the header comment is already present in the upper writer.
+            modelIndexer.toString().replace("// smithy-typescript generated code", "")
+        );
     }
 
     private static void writeProtocolExports(ProtocolGenerator protocolGenerator, TypeScriptWriter writer) {
@@ -64,10 +88,10 @@ final class IndexGenerator {
     }
 
     static void writeServerIndex(
-            TypeScriptSettings settings,
-            Model model,
-            SymbolProvider symbolProvider,
-            FileManifest fileManifest
+        TypeScriptSettings settings,
+        Model model,
+        SymbolProvider symbolProvider,
+        FileManifest fileManifest
     ) {
         TypeScriptWriter writer = new TypeScriptWriter("");
         ServiceShape service = settings.getService(model);
@@ -79,27 +103,43 @@ final class IndexGenerator {
         writer.write("export * from \"./$L\"", symbol.getName());
         fileManifest.writeFile(
             Paths.get(CodegenUtils.SOURCE_FOLDER, ServerSymbolVisitor.SERVER_FOLDER, "index.ts").toString(),
-            writer.toString());
+            writer.toString()
+        );
     }
 
     private static void writeClientExports(
-            TypeScriptSettings settings,
-            Model model,
-            SymbolProvider symbolProvider,
-            TypeScriptWriter writer
+        TypeScriptSettings settings,
+        Model model,
+        SymbolProvider symbolProvider,
+        TypeScriptWriter writer
     ) {
         ServiceShape service = settings.getService(model);
         Symbol symbol = symbolProvider.toSymbol(service);
+        // Normalizes client name, e.g. WeatherClient => Weather
+        String normalizedClientName = ReplaceLast.in(symbol.getName(), "Client", "");
 
         // Write export statement for bare-bones client.
         writer.write("export * from \"./$L\";", symbol.getName());
 
         // Write export statement for aggregated client.
-        String aggregatedClientName = symbol.getName().replace("Client", "");
-        writer.write("export * from \"./$L\";", aggregatedClientName);
+        writer.write("export * from \"./$L\";", normalizedClientName);
+
+        // export endpoints config interface
+        writer.write("export type { ClientInputEndpointParameters } from \"./endpoint/EndpointParameters\";");
+
+        // Export Runtime Extension and Client ExtensionConfiguration interfaces
+        writer.write("export type { RuntimeExtension } from \"./runtimeExtensions\";");
+        writer.write(
+            "export type { $LExtensionConfiguration } from \"./extensionConfiguration\";",
+            normalizedClientName
+        );
 
         // Write export statement for commands.
-        writer.write("export * from \"./commands\";");
+        writer.write(
+            """
+            export * from "./commands";"""
+        );
+        writer.write("export { Command as $$Command } from \"@smithy/core/client\";");
 
         TopDownIndex topDownIndex = TopDownIndex.of(model);
         List<OperationShape> operations = new ArrayList<OperationShape>();

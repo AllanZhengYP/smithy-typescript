@@ -1,18 +1,7 @@
 /*
- * Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
- *
- * Licensed under the Apache License, Version 2.0 (the "License").
- * You may not use this file except in compliance with the License.
- * A copy of the License is located at
- *
- *  http://aws.amazon.com/apache2.0
- *
- * or in the "license" file accompanying this file. This file is distributed
- * on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either
- * express or implied. See the License for the specific language governing
- * permissions and limitations under the License.
+ * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
  */
-
 package software.amazon.smithy.typescript.codegen.integration;
 
 import software.amazon.smithy.codegen.core.CodegenException;
@@ -44,7 +33,10 @@ import software.amazon.smithy.model.shapes.StructureShape;
 import software.amazon.smithy.model.shapes.TimestampShape;
 import software.amazon.smithy.model.shapes.UnionShape;
 import software.amazon.smithy.model.traits.TimestampFormatTrait.Format;
+import software.amazon.smithy.typescript.codegen.SmithyCoreSubmodules;
+import software.amazon.smithy.typescript.codegen.TypeScriptDependency;
 import software.amazon.smithy.typescript.codegen.integration.ProtocolGenerator.GenerationContext;
+import software.amazon.smithy.typescript.codegen.knowledge.SerdeElisionIndex;
 import software.amazon.smithy.utils.SmithyUnstableApi;
 
 /**
@@ -65,9 +57,12 @@ import software.amazon.smithy.utils.SmithyUnstableApi;
  */
 @SmithyUnstableApi
 public class DocumentMemberSerVisitor implements ShapeVisitor<String> {
+
+    protected boolean serdeElisionEnabled;
     private final GenerationContext context;
     private final String dataSource;
     private final Format defaultTimestampFormat;
+    private final SerdeElisionIndex serdeElisionIndex;
 
     /**
      * Constructor.
@@ -78,14 +73,12 @@ public class DocumentMemberSerVisitor implements ShapeVisitor<String> {
      * @param defaultTimestampFormat The default timestamp format used in absence
      *                               of a TimestampFormat trait.
      */
-    public DocumentMemberSerVisitor(
-            GenerationContext context,
-            String dataSource,
-            Format defaultTimestampFormat
-    ) {
+    public DocumentMemberSerVisitor(GenerationContext context, String dataSource, Format defaultTimestampFormat) {
         this.context = context;
         this.dataSource = dataSource;
         this.defaultTimestampFormat = defaultTimestampFormat;
+        this.serdeElisionEnabled = false;
+        this.serdeElisionIndex = SerdeElisionIndex.of(context.getModel());
     }
 
     /**
@@ -165,7 +158,13 @@ public class DocumentMemberSerVisitor implements ShapeVisitor<String> {
     }
 
     private String handleFloat() {
-        context.getWriter().addImport("serializeFloat", "__serializeFloat", "@aws-sdk/smithy-client");
+        context.getWriter()
+            .addImportSubmodule(
+                "serializeFloat",
+                "__serializeFloat",
+                TypeScriptDependency.SMITHY_CORE,
+                SmithyCoreSubmodules.CLIENT
+            );
         return "__serializeFloat(" + dataSource + ")";
     }
 
@@ -178,14 +177,28 @@ public class DocumentMemberSerVisitor implements ShapeVisitor<String> {
         return dataSource;
     }
 
+    /**
+     * This should not be called, since big number serde is handled by format
+     * specific visitors.
+     */
     @Override
     public String bigIntegerShape(BigIntegerShape shape) {
-        return serializeFromBigJs();
+        if (context.getSettings() != null && context.getSettings().getBigNumberMode().equals("big.js")) {
+            return serializeFromBigJs();
+        }
+        return "String(" + dataSource + ")";
     }
 
+    /**
+     * This should not be called, since big number serde is handled by format
+     * specific visitors.
+     */
     @Override
     public String bigDecimalShape(BigDecimalShape shape) {
-        return serializeFromBigJs();
+        if (context.getSettings() != null && context.getSettings().getBigNumberMode().equals("big.js")) {
+            return serializeFromBigJs();
+        }
+        return "String(" + dataSource + ")";
     }
 
     private String serializeFromBigJs() {
@@ -252,7 +265,13 @@ public class DocumentMemberSerVisitor implements ShapeVisitor<String> {
     private String getDelegateSerializer(Shape shape) {
         // Use the shape for the function name.
         Symbol symbol = context.getSymbolProvider().toSymbol(shape);
-        return ProtocolGenerator.getSerFunctionName(symbol, context.getProtocolName())
-                + "(" + dataSource + ", context)";
+
+        if (serdeElisionEnabled && serdeElisionIndex.mayElide(shape)) {
+            context.getWriter()
+                .addImportSubmodule("_json", null, TypeScriptDependency.SMITHY_CORE, SmithyCoreSubmodules.CLIENT);
+            return "_json(" + dataSource + ")";
+        }
+
+        return ProtocolGenerator.getSerFunctionShortName(symbol) + "(" + dataSource + ", context)";
     }
 }

@@ -1,23 +1,13 @@
 /*
- * Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
- *
- * Licensed under the Apache License, Version 2.0 (the "License").
- * You may not use this file except in compliance with the License.
- * A copy of the License is located at
- *
- *  http://aws.amazon.com/apache2.0
- *
- * or in the "license" file accompanying this file. This file is distributed
- * on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either
- * express or implied. See the License for the specific language governing
- * permissions and limitations under the License.
+ * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
  */
-
 package software.amazon.smithy.typescript.codegen.integration;
 
 import java.nio.file.Paths;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
@@ -44,16 +34,18 @@ import software.amazon.smithy.model.traits.MediaTypeTrait;
 import software.amazon.smithy.model.traits.RetryableTrait;
 import software.amazon.smithy.model.traits.TimestampFormatTrait.Format;
 import software.amazon.smithy.typescript.codegen.CodegenUtils;
+import software.amazon.smithy.typescript.codegen.SmithyCoreSubmodules;
 import software.amazon.smithy.typescript.codegen.TypeScriptDependency;
 import software.amazon.smithy.typescript.codegen.TypeScriptWriter;
 import software.amazon.smithy.typescript.codegen.integration.ProtocolGenerator.GenerationContext;
-import software.amazon.smithy.utils.IoUtils;
+import software.amazon.smithy.utils.SmithyInternalApi;
 import software.amazon.smithy.utils.SmithyUnstableApi;
 
 /**
  * Utility methods for generating HTTP protocols.
  */
 @SmithyUnstableApi
+@SmithyInternalApi
 public final class HttpProtocolGeneratorUtils {
 
     private static final Logger LOGGER = Logger.getLogger(HttpBindingProtocolGenerator.class.getName());
@@ -72,22 +64,36 @@ public final class HttpProtocolGeneratorUtils {
      * @return Returns a value or expression of the input timestamp.
      */
     public static String getTimestampInputParam(
-            GenerationContext context,
-            String dataSource,
-            Shape shape,
-            Format format
+        GenerationContext context,
+        String dataSource,
+        Shape shape,
+        Format format
     ) {
         switch (format) {
             case DATE_TIME:
-                // Use the split to not serialize milliseconds.
-                return "(" + dataSource + ".toISOString().split('.')[0]+\"Z\")";
+                context
+                    .getWriter()
+                    .addImportSubmodule(
+                        "serializeDateTime",
+                        "__serializeDateTime",
+                        TypeScriptDependency.SMITHY_CORE,
+                        SmithyCoreSubmodules.CLIENT
+                    );
+                return "__serializeDateTime(" + dataSource + ")";
             case EPOCH_SECONDS:
-                return "Math.round(" + dataSource + ".getTime() / 1000)";
+                return "(" + dataSource + ".getTime() / 1_000)";
             case HTTP_DATE:
-                context.getWriter().addImport("dateToUtcString", "__dateToUtcString", "@aws-sdk/smithy-client");
+                context
+                    .getWriter()
+                    .addImportSubmodule(
+                        "dateToUtcString",
+                        "__dateToUtcString",
+                        TypeScriptDependency.SMITHY_CORE,
+                        SmithyCoreSubmodules.SERDE
+                    );
                 return "__dateToUtcString(" + dataSource + ")";
             default:
-                throw new CodegenException("Unexpected timestamp format `" + format.toString() + "` on " + shape);
+                throw new CodegenException("Unexpected timestamp format `" + format + "` on " + shape);
         }
     }
 
@@ -103,30 +109,72 @@ public final class HttpProtocolGeneratorUtils {
      * @param format The timestamp format to provide.
      * @param requireNumericEpochSecondsInPayload if true, paylaod epoch seconds are not allowed to be coerced
      *                                            from strings.
+     * @param isClient true if generating a client.
      * @return Returns a value or expression of the output timestamp.
      */
-    public static String getTimestampOutputParam(TypeScriptWriter writer,
-                                                 String dataSource,
-                                                 Location bindingType,
-                                                 Shape shape,
-                                                 Format format,
-                                                 boolean requireNumericEpochSecondsInPayload) {
+    public static String getTimestampOutputParam(
+        TypeScriptWriter writer,
+        String dataSource,
+        Location bindingType,
+        Shape shape,
+        Format format,
+        boolean requireNumericEpochSecondsInPayload,
+        boolean isClient
+    ) {
         // This has always explicitly wrapped the dataSource in "new Date(..)", so it could never generate
         // an expression that evaluates to null. Codegen relies on this.
-        writer.addImport("expectNonNull", "__expectNonNull", "@aws-sdk/smithy-client");
+        writer.addImportSubmodule(
+            "expectNonNull",
+            "__expectNonNull",
+            TypeScriptDependency.SMITHY_CORE,
+            SmithyCoreSubmodules.SERDE
+        );
         switch (format) {
             case DATE_TIME:
-                writer.addImport("parseRfc3339DateTime", "__parseRfc3339DateTime", "@aws-sdk/smithy-client");
-                return String.format("__expectNonNull(__parseRfc3339DateTime(%s))", dataSource);
+                // Clients should be able to handle offsets and normalize the datetime to an offset of zero.
+                if (isClient) {
+                    writer.addImportSubmodule(
+                        "parseRfc3339DateTimeWithOffset",
+                        "__parseRfc3339DateTimeWithOffset",
+                        TypeScriptDependency.SMITHY_CORE,
+                        SmithyCoreSubmodules.SERDE
+                    );
+                    return String.format("__expectNonNull(__parseRfc3339DateTimeWithOffset(%s))", dataSource);
+                } else {
+                    writer.addImportSubmodule(
+                        "parseRfc3339DateTime",
+                        "__parseRfc3339DateTime",
+                        TypeScriptDependency.SMITHY_CORE,
+                        SmithyCoreSubmodules.SERDE
+                    );
+                    return String.format("__expectNonNull(__parseRfc3339DateTime(%s))", dataSource);
+                }
             case HTTP_DATE:
-                writer.addImport("parseRfc7231DateTime", "__parseRfc7231DateTime", "@aws-sdk/smithy-client");
+                writer.addImportSubmodule(
+                    "parseRfc7231DateTime",
+                    "__parseRfc7231DateTime",
+                    TypeScriptDependency.SMITHY_CORE,
+                    SmithyCoreSubmodules.SERDE
+                );
                 return String.format("__expectNonNull(__parseRfc7231DateTime(%s))", dataSource);
             case EPOCH_SECONDS:
-                writer.addImport("parseEpochTimestamp", "__parseEpochTimestamp", "@aws-sdk/smithy-client");
+                writer.addImportSubmodule(
+                    "parseEpochTimestamp",
+                    "__parseEpochTimestamp",
+                    TypeScriptDependency.SMITHY_CORE,
+                    SmithyCoreSubmodules.SERDE
+                );
                 String modifiedDataSource = dataSource;
-                if (requireNumericEpochSecondsInPayload
-                        && (bindingType == Location.DOCUMENT || bindingType == Location.PAYLOAD)) {
-                    writer.addImport("expectNumber", "__expectNumber", "@aws-sdk/smithy-client");
+                if (
+                    requireNumericEpochSecondsInPayload &&
+                        (bindingType == Location.DOCUMENT || bindingType == Location.PAYLOAD)
+                ) {
+                    writer.addImportSubmodule(
+                        "expectNumber",
+                        "__expectNumber",
+                        TypeScriptDependency.SMITHY_CORE,
+                        SmithyCoreSubmodules.SERDE
+                    );
                     modifiedDataSource = String.format("__expectNumber(%s)", dataSource);
                 }
                 return String.format("__expectNonNull(__parseEpochTimestamp(%s))", modifiedDataSource);
@@ -147,15 +195,20 @@ public final class HttpProtocolGeneratorUtils {
      *   ({@code input.foo}, {@code entry}, etc.)
      * @return Returns a value or expression of the input string.
      */
-    static String getStringInputParam(GenerationContext context, Shape shape, String dataSource) {
+    public static String getStringInputParam(GenerationContext context, Shape shape, String dataSource) {
         // Handle media type generation, defaulting to the dataSource.
         Optional<MediaTypeTrait> mediaTypeTrait = shape.getTrait(MediaTypeTrait.class);
         if (mediaTypeTrait.isPresent()) {
             String mediaType = mediaTypeTrait.get().getValue();
             if (CodegenUtils.isJsonMediaType(mediaType)) {
                 TypeScriptWriter writer = context.getWriter();
-                writer.addImport("LazyJsonString", "__LazyJsonString", "@aws-sdk/smithy-client");
-                return "__LazyJsonString.fromObject(" + dataSource + ")";
+                writer.addImportSubmodule(
+                    "LazyJsonString",
+                    "__LazyJsonString",
+                    TypeScriptDependency.SMITHY_CORE,
+                    SmithyCoreSubmodules.SERDE
+                );
+                return "__LazyJsonString.from(" + dataSource + ")";
             } else {
                 LOGGER.warning(() -> "Found unsupported mediatype " + mediaType + " on String shape: " + shape);
             }
@@ -178,15 +231,25 @@ public final class HttpProtocolGeneratorUtils {
      *   only be false if the value is guaranteed to be a string already.
      * @return Returns a value or expression of the output string.
      */
-    static String getStringOutputParam(GenerationContext context, Shape shape, String dataSource, boolean useExpect) {
+    public static String getStringOutputParam(
+        GenerationContext context,
+        Shape shape,
+        String dataSource,
+        boolean useExpect
+    ) {
         // Handle media type generation, defaulting to a standard String.
         Optional<MediaTypeTrait> mediaTypeTrait = shape.getTrait(MediaTypeTrait.class);
         if (mediaTypeTrait.isPresent()) {
             String mediaType = mediaTypeTrait.get().getValue();
             if (CodegenUtils.isJsonMediaType(mediaType)) {
                 TypeScriptWriter writer = context.getWriter();
-                writer.addImport("LazyJsonString", "__LazyJsonString", "@aws-sdk/smithy-client");
-                return "new __LazyJsonString(" + dataSource + ")";
+                writer.addImportSubmodule(
+                    "LazyJsonString",
+                    "__LazyJsonString",
+                    TypeScriptDependency.SMITHY_CORE,
+                    SmithyCoreSubmodules.SERDE
+                );
+                return "__LazyJsonString.from(" + dataSource + ")";
             } else {
                 LOGGER.warning(() -> "Found unsupported mediatype " + mediaType + " on String shape: " + shape);
             }
@@ -195,7 +258,13 @@ public final class HttpProtocolGeneratorUtils {
         if (!useExpect) {
             return dataSource;
         }
-        context.getWriter().addImport("expectString", "__expectString", "@aws-sdk/smithy-client");
+        context.getWriter()
+            .addImportSubmodule(
+                "expectString",
+                "__expectString",
+                TypeScriptDependency.SMITHY_CORE,
+                SmithyCoreSubmodules.SERDE
+            );
         return "__expectString(" + dataSource + ")";
     }
 
@@ -211,7 +280,7 @@ public final class HttpProtocolGeneratorUtils {
      *   ({@code output.foo}, {@code entry}, etc.)
      * @return Returns a value or expression of the output string.
      */
-    static String getStringOutputParam(GenerationContext context, Shape shape, String dataSource) {
+    public static String getStringOutputParam(GenerationContext context, Shape shape, String dataSource) {
         return getStringOutputParam(context, shape, dataSource, true);
     }
 
@@ -222,68 +291,45 @@ public final class HttpProtocolGeneratorUtils {
      * @param context The generation context.
      * @param responseType The response type for the HTTP protocol.
      */
-    static void generateMetadataDeserializer(GenerationContext context, SymbolReference responseType) {
+    public static void generateMetadataDeserializer(GenerationContext context, SymbolReference responseType) {
         TypeScriptWriter writer = context.getWriter();
 
-        writer.addImport("ResponseMetadata", "__ResponseMetadata", "@aws-sdk/types");
-        writer.openBlock("const deserializeMetadata = (output: $T): __ResponseMetadata => ({", "});", responseType,
-                () -> {
-                    writer.write("httpStatusCode: output.statusCode,");
-                    writer.write("requestId: output.headers[\"x-amzn-requestid\"] ??"
-                        + " output.headers[\"x-amzn-request-id\"] ??"
-                        + " output.headers[\"x-amz-request-id\"],");
-                    writer.write("extendedRequestId: output.headers[\"x-amz-id-2\"],");
-                    writer.write("cfId: output.headers[\"x-amz-cf-id\"],");
-                });
-        writer.write("");
-    }
-
-    /**
-     * Writes a response body stream collector. This function converts the low-level response body stream to
-     * Uint8Array binary data.
-     *
-     * @param context The generation context.
-     */
-    static void generateCollectBody(GenerationContext context) {
-        TypeScriptWriter writer = context.getWriter();
-
-        writer.addImport("SerdeContext", "__SerdeContext", "@aws-sdk/types");
-        writer.write("// Collect low-level response body stream to Uint8Array.");
-        writer.openBlock("const collectBody = (streamBody: any = new Uint8Array(), context: __SerdeContext): "
-                + "Promise<Uint8Array> => {", "};", () -> {
-            writer.openBlock("if (streamBody instanceof Uint8Array) {", "}", () -> {
-                writer.write("return Promise.resolve(streamBody);");
-            });
-            writer.write("return context.streamCollector(streamBody) || Promise.resolve(new Uint8Array());");
-        });
-
+        writer.addTypeImport("ResponseMetadata", "__ResponseMetadata", TypeScriptDependency.SMITHY_TYPES);
+        writer.openBlock(
+            "const deserializeMetadata = (output: $T): __ResponseMetadata => ({",
+            "});",
+            responseType,
+            () -> {
+                writer.write("httpStatusCode: output.statusCode,");
+                writer.write(
+                    "requestId: output.headers[\"x-amzn-requestid\"] ??" +
+                        " output.headers[\"x-amzn-request-id\"] ??" +
+                        " output.headers[\"x-amz-request-id\"],"
+                );
+                writer.write("extendedRequestId: output.headers[\"x-amz-id-2\"],");
+                writer.write("cfId: output.headers[\"x-amz-cf-id\"],");
+            }
+        );
         writer.write("");
     }
 
     /**
      * Writes a function converting the low-level response body stream to utf-8 encoded string. It depends on
-     * response body stream collector {@link #generateCollectBody(GenerationContext)}.
+     * response body stream collector.
      *
      * @param context The generation context
      */
-    static void generateCollectBodyString(GenerationContext context) {
+    public static void generateCollectBodyString(GenerationContext context) {
         TypeScriptWriter writer = context.getWriter();
-
-        writer.addImport("SerdeContext", "__SerdeContext", "@aws-sdk/types");
+        writer
+            .addImportSubmodule("collectBody", null, TypeScriptDependency.SMITHY_CORE, SmithyCoreSubmodules.PROTOCOLS);
+        writer.addTypeImport("SerdeContext", "__SerdeContext", TypeScriptDependency.SMITHY_TYPES);
         writer.write("// Encode Uint8Array data into string with utf-8.");
-        writer.write("const collectBodyString = (streamBody: any, context: __SerdeContext): Promise<string> => "
-                + "collectBody(streamBody, context).then(body => context.utf8Encoder(body))");
+        writer.write(
+            "const collectBodyString = (streamBody: any, context: __SerdeContext): Promise<string> => " +
+                "collectBody(streamBody, context).then(body => context.utf8Encoder(body))"
+        );
         writer.write("");
-    }
-
-    /**
-     * Writes any additional utils needed for HTTP protocols with bindings.
-     *
-     * @param context The generation context.
-     */
-    static void generateHttpBindingUtils(GenerationContext context) {
-        TypeScriptWriter writer = context.getWriter();
-        writer.write(IoUtils.readUtf8Resource(HttpProtocolGeneratorUtils.class, "http-binding-utils.ts"));
     }
 
     /**
@@ -297,7 +343,7 @@ public final class HttpProtocolGeneratorUtils {
         Optional<RetryableTrait> retryableTrait = error.getTrait(RetryableTrait.class);
         if (retryableTrait.isPresent()) {
             String textAfterBlock = String.format("}%s", separator);
-            writer.openBlock("$$retryable = {", textAfterBlock, () -> {
+            writer.openCollapsibleBlock("$$retryable = {", textAfterBlock, retryableTrait.get().getThrottling(), () -> {
                 if (retryableTrait.get().getThrottling()) {
                     writer.write("throttling: true,");
                 }
@@ -307,12 +353,11 @@ public final class HttpProtocolGeneratorUtils {
 
     /**
      * Writes a function used to dispatch to the proper error deserializer
-     * for each error that the operation can return. The generated function
+     * for each error that any operation can return. The generated function
      * assumes a deserialization function is generated for the structures
      * returned.
      *
      * @param context The generation context.
-     * @param operation The operation to generate for.
      * @param responseType The response type for the HTTP protocol.
      * @param errorCodeGenerator A consumer
      * @param shouldParseErrorBody Flag indicating whether need to parse response body in this dispatcher function
@@ -320,95 +365,103 @@ public final class HttpProtocolGeneratorUtils {
      * @param operationErrorsToShapes A map of error names to their {@link ShapeId}.
      * @return A set of all error structure shapes for the operation that were dispatched to.
      */
-    static Set<StructureShape> generateErrorDispatcher(
-            GenerationContext context,
-            OperationShape operation,
-            SymbolReference responseType,
-            Consumer<GenerationContext> errorCodeGenerator,
-            boolean shouldParseErrorBody,
-            BiFunction<GenerationContext, String, String> bodyErrorLocationModifier,
-            BiFunction<GenerationContext, OperationShape, Map<String, ShapeId>> operationErrorsToShapes
+    public static Set<StructureShape> generateUnifiedErrorDispatcher(
+        GenerationContext context,
+        List<OperationShape> operations,
+        SymbolReference responseType,
+        Consumer<GenerationContext> errorCodeGenerator,
+        boolean shouldParseErrorBody,
+        BiFunction<GenerationContext, String, String> bodyErrorLocationModifier,
+        BiFunction<GenerationContext, List<OperationShape>, Map<String, ShapeId>> operationErrorsToShapes,
+        Map<String, TreeSet<String>> errorAliases
     ) {
         TypeScriptWriter writer = context.getWriter();
         SymbolProvider symbolProvider = context.getSymbolProvider();
         Set<StructureShape> errorShapes = new TreeSet<>();
 
-        Symbol symbol = symbolProvider.toSymbol(operation);
-        Symbol outputType = symbol.expectProperty("outputType", Symbol.class);
-        String errorMethodName = ProtocolGenerator.getDeserFunctionName(symbol, context.getProtocolName()) + "Error";
+        String errorMethodName = "de_CommandError";
+        String errorMethodLongName =
+            "deserialize_" + ProtocolGenerator.getSanitizedName(context.getProtocolName()) + "CommandError";
 
-        writer.openBlock("const $L = async(\n"
-                       + "  output: $T,\n"
-                       + "  context: __SerdeContext,\n"
-                       + "): Promise<$T> => {", "}", errorMethodName, responseType, outputType, () -> {
-            // Prepare error response for parsing error code. If error code needs to be parsed from response body
-            // then we collect body and parse it to JS object, otherwise leave the response body as is.
-            if (shouldParseErrorBody) {
-                writer.openBlock("const parsedOutput: any = {", "};",
-                        () -> {
-                            writer.write("...output,");
-                            writer.write("body: await parseErrorBody(output.body, context)");
-                        });
-            }
-
-            // Error responses must be at least BaseException interface
-            SymbolReference baseExceptionReference = getClientBaseException(context);
-            errorCodeGenerator.accept(context);
-
-            Runnable defaultErrorHandler = () -> {
+        writer.writeDocs(errorMethodLongName);
+        writer.openBlock(
+            "const $L = async (\n" + "  output: $T,\n" + "  context: __SerdeContext,\n" + "): Promise<never> => {",
+            "}",
+            errorMethodName,
+            responseType,
+            () -> {
+                // Prepare error response for parsing error code. If error code needs to be parsed from response body
+                // then we collect body and parse it to JS object, otherwise leave the response body as is.
                 if (shouldParseErrorBody) {
-                    // Body is already parsed above
-                    writer.write("const parsedBody = parsedOutput.body;");
-                } else {
-                    // Body is not parsed above, so parse it here
-                    writer.write("const parsedBody = await parseBody(output.body, context);");
+                    writer.openBlock("const parsedOutput: any = {", "};", () -> {
+                        writer.write("...output,");
+                        writer.write("body: await parseErrorBody(output.body, context)");
+                    });
                 }
 
-                writer.addImport("throwDefaultError", "throwDefaultError", "@aws-sdk/smithy-client");
+                // Error responses must be at least BaseException interface
+                errorCodeGenerator.accept(context);
 
-                // Get the protocol specific error location for retrieving contents.
-                String errorLocation = bodyErrorLocationModifier.apply(context, "parsedBody");
-                writer.openBlock("throwDefaultError({", "})", () -> {
-                    writer.write("output,");
-                    if (errorLocation.equals("parsedBody")) {
-                        writer.write("parsedBody,");
+                Runnable defaultErrorHandler = () -> {
+                    if (shouldParseErrorBody) {
+                        // Body is already parsed above
+                        writer.write("const parsedBody = parsedOutput.body;");
                     } else {
-                        writer.write("parsedBody: $L,", errorLocation);
+                        // Body is not parsed above, so parse it here
+                        writer.write("const parsedBody = await parseBody(output.body, context);");
                     }
-                    writer.write("exceptionCtor: $T,", baseExceptionReference);
-                    writer.write("errorCode");
-                });
-            };
 
-            Map<String, ShapeId> operationNamesToShapes = operationErrorsToShapes.apply(context, operation);
-            if (!operationNamesToShapes.isEmpty()) {
-                writer.openBlock("switch (errorCode) {", "}", () -> {
-                    // Generate the case statement for each error, invoking the specific deserializer.
-
-                    operationNamesToShapes.forEach((name, errorId) -> {
-                        StructureShape error = context.getModel().expectShape(errorId).asStructureShape().get();
-                        // Track errors bound to the operation so their deserializers may be generated.
-                        errorShapes.add(error);
-                        Symbol errorSymbol = symbolProvider.toSymbol(error);
-                        String errorDeserMethodName = ProtocolGenerator.getDeserFunctionName(errorSymbol,
-                            context.getProtocolName()) + "Response";
-                        // Dispatch to the error deserialization function.
-                        String outputParam = shouldParseErrorBody ? "parsedOutput" : "output";
-                        writer.write("case $S:", name);
-                        writer.write("case $S:", errorId.toString());
-                        writer.indent()
-                            .write("throw await $L($L, context);", errorDeserMethodName, outputParam)
-                            .dedent();
+                    // Get the protocol specific error location for retrieving contents.
+                    String errorLocation = bodyErrorLocationModifier.apply(context, "parsedBody");
+                    writer.openBlock("return throwDefaultError({", "}) as never;", () -> {
+                        writer.write("output,");
+                        if (errorLocation.equals("parsedBody")) {
+                            writer.write("parsedBody,");
+                        } else {
+                            writer.write("parsedBody: $L,", errorLocation);
+                        }
+                        writer.write("errorCode");
                     });
+                };
 
-                    // Build a generic error the best we can for ones we don't know about.
-                    writer.write("default:").indent();
+                Map<String, ShapeId> operationNamesToShapes = operationErrorsToShapes.apply(context, operations);
+
+                if (!operationNamesToShapes.isEmpty()) {
+                    writer.openBlock("switch (errorCode) {", "}", () -> {
+                        // Generate the case statement for each error, invoking the specific deserializer.
+
+                        operationNamesToShapes.forEach((name, errorId) -> {
+                            StructureShape error = context.getModel().expectShape(errorId).asStructureShape().get();
+                            // Track errors bound to the operation so their deserializers may be generated.
+                            errorShapes.add(error);
+                            Symbol errorSymbol = symbolProvider.toSymbol(error);
+                            String errorDeserMethodName =
+                                ProtocolGenerator.getDeserFunctionShortName(errorSymbol) + "Res";
+                            // Dispatch to the error deserialization function.
+                            String outputParam = shouldParseErrorBody ? "parsedOutput" : "output";
+                            writer.write("case $S:", name);
+                            writer.write("case $S:", errorId.toString());
+                            for (String alias : errorAliases.getOrDefault(errorId.toString(), new TreeSet<>())) {
+                                if (!Objects.equals(name, alias) && !Objects.equals(errorId.toString(), alias)) {
+                                    writer.write("case $S:", alias);
+                                }
+                            }
+                            writer
+                                .indent()
+                                .write("throw await $L($L, context);", errorDeserMethodName, outputParam)
+                                .dedent();
+                        });
+
+                        // Build a generic error the best we can for ones we don't know about.
+                        writer.write("default:").indent();
+                        defaultErrorHandler.run();
+                        writer.dedent();
+                    });
+                } else {
                     defaultErrorHandler.run();
-                });
-            } else {
-                defaultErrorHandler.run();
+                }
             }
-        });
+        );
         writer.write("");
 
         return errorShapes;
@@ -421,28 +474,36 @@ public final class HttpProtocolGeneratorUtils {
      * @param context The generation context.
      * @param operation The operation to generate for.
      */
-    static void writeHostPrefix(GenerationContext context, OperationShape operation) {
+    public static void writeHostPrefix(GenerationContext context, OperationShape operation) {
         TypeScriptWriter writer = context.getWriter();
         SymbolProvider symbolProvider = context.getSymbolProvider();
         EndpointTrait trait = operation.getTrait(EndpointTrait.class).get();
         writer.write("let { hostname: resolvedHostname } = await context.endpoint();");
         // Check if disableHostPrefixInjection has been set to true at runtime
         writer.openBlock("if (context.disableHostPrefix !== true) {", "}", () -> {
-            writer.addImport("isValidHostname", "__isValidHostname",
-                    TypeScriptDependency.AWS_SDK_PROTOCOL_HTTP.packageName);
+            writer.addImportSubmodule(
+                "isValidHostname",
+                "__isValidHostname",
+                TypeScriptDependency.SMITHY_CORE,
+                SmithyCoreSubmodules.PROTOCOLS
+            );
             writer.write("resolvedHostname = $S + resolvedHostname;", trait.getHostPrefix().toString());
             if (operation.getInput().isPresent()) {
                 List<SmithyPattern.Segment> prefixLabels = trait.getHostPrefix().getLabels();
-                StructureShape inputShape = context.getModel().expectShape(operation.getInput()
-                        .get(), StructureShape.class);
+                StructureShape inputShape = context
+                    .getModel()
+                    .expectShape(operation.getInput().get(), StructureShape.class);
                 for (SmithyPattern.Segment label : prefixLabels) {
                     MemberShape member = inputShape.getMember(label.getContent()).get();
                     String memberName = symbolProvider.toMemberName(member);
                     writer.openBlock("if (input.$L === undefined) {", "}", memberName, () -> {
                         writer.write("throw new Error('Empty value provided for input host prefix: $L.');", memberName);
                     });
-                    writer.write("resolvedHostname = resolvedHostname.replace(\"{$L}\", input.$L!)",
-                            label.getContent(), memberName);
+                    writer.write(
+                        "resolvedHostname = resolvedHostname.replace(\"{$L}\", input.$L!)",
+                        label.getContent(),
+                        memberName
+                    );
                 }
             }
             writer.openBlock("if (!__isValidHostname(resolvedHostname)) {", "}", () -> {
@@ -454,21 +515,22 @@ public final class HttpProtocolGeneratorUtils {
     /**
      * Construct a symbol reference of client's base exception class.
      */
-    private static SymbolReference getClientBaseException(GenerationContext context) {
+    public static SymbolReference getClientBaseException(GenerationContext context) {
         ServiceShape service = context.getService();
         SymbolProvider symbolProvider = context.getSymbolProvider();
-        String serviceExceptionName = symbolProvider.toSymbol(service).getName()
-                        .replaceAll("(Client)$", "ServiceException");
+        String serviceName = symbolProvider.toSymbol(service).getName().replaceAll("(Client)$", "");
+        String serviceExceptionName = CodegenUtils.getSyntheticBaseExceptionName(serviceName, context.getModel());
         String namespace = Paths.get(".", "src", "models", serviceExceptionName).toString();
         Symbol serviceExceptionSymbol = Symbol.builder()
-                            .name(serviceExceptionName)
-                            .namespace(namespace, "/")
-                            .definitionFile(namespace + ".ts").build();
+            .name(serviceExceptionName)
+            .namespace(namespace, "/")
+            .definitionFile(namespace + ".ts")
+            .build();
         return SymbolReference.builder()
-                .options(SymbolReference.ContextOption.USE)
-                .alias("__BaseException")
-                .symbol(serviceExceptionSymbol)
-                .build();
+            .options(SymbolReference.ContextOption.USE)
+            .alias("__BaseException")
+            .symbol(serviceExceptionSymbol)
+            .build();
     }
 
     /**
@@ -479,15 +541,23 @@ public final class HttpProtocolGeneratorUtils {
      * @return map of error names to {@link ShapeId}
      */
     public static Map<String, ShapeId> getOperationErrors(GenerationContext context, OperationShape operation) {
-        return operation.getErrors().stream()
-            .collect(Collectors.toMap(
-                shapeId -> shapeId.getName(context.getService()),
-                Function.identity(),
-                (x, y) -> {
-                    if (!x.equals(y)) {
-                        throw new CodegenException(String.format("conflicting error shape ids: %s, %s", x, y));
-                    }
-                    return x;
-                }, TreeMap::new));
+        return operation
+            .getErrors()
+            .stream()
+            .collect(
+                Collectors.toMap(
+                    shapeId -> shapeId.getName(context.getService()),
+                    Function.identity(),
+                    (x, y) -> {
+                        if (!x.equals(y)) {
+                            throw new CodegenException(
+                                String.format("conflicting error shape ids: %s, %s", x, y)
+                            );
+                        }
+                        return x;
+                    },
+                    TreeMap::new
+                )
+            );
     }
 }

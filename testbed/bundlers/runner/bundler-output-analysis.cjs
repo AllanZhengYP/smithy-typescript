@@ -1,0 +1,498 @@
+const { parse } = require("acorn");
+const walk = require("acorn-walk");
+
+const MODULE = "module";
+const BUFFER = "Buffer";
+const TYPEOF = "typeof";
+const LOGICAL_AND = "&&";
+const NOT = "!";
+const IDENTIFIER = "Identifier";
+const UNARY_EXPRESSION = "UnaryExpression";
+const BINARY_EXPRESSION = "BinaryExpression";
+const LOGICAL_EXPRESSION = "LogicalExpression";
+const MEMBER_EXPRESSION = "MemberExpression";
+const OBJECT_PATTERN = "ObjectPattern";
+const ARRAY_PATTERN = "ArrayPattern";
+const REST_ELEMENT = "RestElement";
+const ASSIGNMENT_PATTERN = "AssignmentPattern";
+const FUNCTION_DECLARATION = "FunctionDeclaration";
+const FUNCTION_EXPRESSION = "FunctionExpression";
+const ARROW_FUNCTION_EXPRESSION = "ArrowFunctionExpression";
+
+/**
+ * Detects unguarded references to the global `Buffer` identifier in bundled code.
+ *
+ * Guarded means the reference is inside a `typeof Buffer` check, a variable
+ * derived from such a check (e.g. `USE_BUFFER`), or a polyfill assignment scope.
+ *
+ * @param {string} code - bundle source text.
+ * @returns {{ line: number, column: number }[]} unguarded global Buffer references.
+ * @internal
+ */
+function findGlobalBufferRefs(code) {
+  let ast;
+  try {
+    ast = parse(code, {
+      ecmaVersion: 2022,
+      sourceType: MODULE,
+      allowHashBang: true,
+      locations: true,
+    });
+  } catch {
+    ast = parse(code, {
+      ecmaVersion: 2022,
+      sourceType: "script",
+      allowHashBang: true,
+      allowImportExportEverywhere: true,
+      locations: true,
+    });
+  }
+
+  const polyfillRanges = collectPolyfillRanges(ast);
+  const guardedRanges = collectGuardedRanges(ast);
+  addSelfGuardingFunctions(ast, guardedRanges);
+  addGuardedCallTargets(ast, guardedRanges);
+  const typeofArgPositions = collectTypeofArgPositions(ast);
+
+  // Scope-aware walk: track local declarations to distinguish global Buffer.
+  const scopeStack = [new Set()];
+  const globalRefs = [];
+
+  function isDeclared(name) {
+    for (let i = scopeStack.length - 1; i >= 0; --i) {
+      if (scopeStack[i].has(name)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function isGuarded(node) {
+    for (let i = 0; i < guardedRanges.length; ++i) {
+      const r = guardedRanges[i];
+      if (node.start >= r.start && node.end <= r.end) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function isInPolyfill(node) {
+    for (let i = 0; i < polyfillRanges.length; ++i) {
+      const r = polyfillRanges[i];
+      if (node.start >= r.start && node.end <= r.end) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  walk.recursive(ast, null, {
+    FunctionDeclaration(node, state, c) {
+      if (node.id) {
+        scopeStack[scopeStack.length - 1].add(node.id.name);
+      }
+      const scope = new Set();
+      scopeStack.push(scope);
+      for (let i = 0; i < node.params.length; ++i) {
+        extractBindings(node.params[i], scope);
+      }
+      c(node.body, state);
+      scopeStack.pop();
+    },
+    FunctionExpression(node, state, c) {
+      const scope = new Set();
+      scopeStack.push(scope);
+      if (node.id) {
+        scope.add(node.id.name);
+      }
+      for (let i = 0; i < node.params.length; ++i) {
+        extractBindings(node.params[i], scope);
+      }
+      c(node.body, state);
+      scopeStack.pop();
+    },
+    ArrowFunctionExpression(node, state, c) {
+      const scope = new Set();
+      scopeStack.push(scope);
+      for (let i = 0; i < node.params.length; ++i) {
+        extractBindings(node.params[i], scope);
+      }
+      c(node.body, state);
+      scopeStack.pop();
+    },
+    BlockStatement(node, state, c) {
+      scopeStack.push(new Set());
+      for (let i = 0; i < node.body.length; ++i) {
+        c(node.body[i], state);
+      }
+      scopeStack.pop();
+    },
+    ForStatement(node, state, c) {
+      scopeStack.push(new Set());
+      if (node.init) {
+        c(node.init, state);
+      }
+      if (node.test) {
+        c(node.test, state);
+      }
+      if (node.update) {
+        c(node.update, state);
+      }
+      c(node.body, state);
+      scopeStack.pop();
+    },
+    VariableDeclaration(node, state, c) {
+      const scope = scopeStack[scopeStack.length - 1];
+      for (let i = 0; i < node.declarations.length; ++i) {
+        const decl = node.declarations[i];
+        extractBindings(decl.id, scope);
+        if (decl.init) {
+          c(decl.init, state);
+        }
+      }
+    },
+    CatchClause(node, state, c) {
+      const scope = new Set();
+      scopeStack.push(scope);
+      if (node.param) {
+        extractBindings(node.param, scope);
+      }
+      c(node.body, state);
+      scopeStack.pop();
+    },
+    Identifier(node) {
+      if (
+        node.name === BUFFER &&
+        !isDeclared(BUFFER) &&
+        !typeofArgPositions.has(node.start) &&
+        !isGuarded(node) &&
+        !isInPolyfill(node)
+      ) {
+        globalRefs.push({ line: node.loc.start.line, column: node.loc.start.column });
+      }
+    },
+    MemberExpression(node, state, c) {
+      c(node.object, state);
+      if (node.computed) {
+        c(node.property, state);
+      }
+    },
+  });
+
+  return globalRefs;
+}
+
+/**
+ * Collects ranges of functions that assign to Buffer (polyfill code).
+ */
+function collectPolyfillRanges(ast) {
+  const ranges = [];
+  walk.ancestor(ast, {
+    AssignmentExpression(node, ancestors) {
+      if (isBufferAssignTarget(node.left)) {
+        const fn = findEnclosingFunction(ancestors);
+        if (fn) {
+          ranges.push({ start: fn.start, end: fn.end });
+        }
+      }
+    },
+    VariableDeclarator(node, ancestors) {
+      if (node.id.type === IDENTIFIER && node.id.name === BUFFER) {
+        const fn = findEnclosingFunction(ancestors);
+        if (fn) {
+          ranges.push({ start: fn.start, end: fn.end });
+        }
+      }
+    },
+  });
+  return ranges;
+}
+
+/**
+ * Collects AST ranges protected by typeof Buffer checks or derived variables.
+ */
+function collectGuardedRanges(ast) {
+  // Variables assigned from typeof Buffer expressions (e.g. USE_BUFFER).
+  const typeofBufferVars = new Set();
+  walk.simple(ast, {
+    VariableDeclarator(node) {
+      if (node.id.type === IDENTIFIER && node.init && containsTypeofBuffer(node.init)) {
+        typeofBufferVars.add(node.id.name);
+      }
+    },
+  });
+
+  function isTypeofBufferVar(node) {
+    if (node.type === IDENTIFIER && typeofBufferVars.has(node.name)) {
+      return true;
+    }
+    if (node.type === UNARY_EXPRESSION && node.operator === NOT && isTypeofBufferVar(node.argument)) {
+      return true;
+    }
+    return false;
+  }
+
+  const ranges = [];
+  walk.simple(ast, {
+    ConditionalExpression(node) {
+      if (containsTypeofBuffer(node.test) || isTypeofBufferVar(node.test) || containsGuardCall(node.test)) {
+        ranges.push(node);
+      }
+    },
+    IfStatement(node) {
+      if (containsTypeofBuffer(node.test) || isTypeofBufferVar(node.test) || containsGuardCall(node.test)) {
+        ranges.push(node);
+      }
+    },
+    LogicalExpression(node) {
+      if (
+        node.operator === LOGICAL_AND &&
+        (containsTypeofBuffer(node.left) || isTypeofBufferVar(node.left) || containsGuardCall(node.left))
+      ) {
+        ranges.push(node);
+      }
+    },
+  });
+  return ranges;
+}
+
+/**
+ * Collects start positions of Buffer identifiers used as typeof operands.
+ * These are not actual references to the Buffer value.
+ */
+function collectTypeofArgPositions(ast) {
+  const positions = new Set();
+  walk.simple(ast, {
+    UnaryExpression(node) {
+      if (node.operator === TYPEOF && node.argument.type === IDENTIFIER && node.argument.name === BUFFER) {
+        positions.add(node.argument.start);
+      }
+    },
+  });
+  return positions;
+}
+
+/**
+ * Names of functions that internally guard their own global `Buffer` usage
+ * (e.g. via a `typeof Buffer` check plus try/catch for runtime capability
+ * detection). A reference to `Buffer` inside such a function is safe, but a
+ * bundler/minifier may rewrite the `typeof Buffer` guard into a shape that
+ * {@link collectGuardedRanges} no longer recognizes. Treat the entire body of
+ * these functions as a guarded range so a call to them counts as guarded
+ * Buffer usage.
+ */
+const SELF_GUARDING_BUFFER_FUNCTIONS = new Set(["detectBufferParsing"]);
+
+/**
+ * Adds the bodies of known self-guarding Buffer functions (see
+ * {@link SELF_GUARDING_BUFFER_FUNCTIONS}) to the guarded ranges array.
+ */
+function addSelfGuardingFunctions(ast, guardedRanges) {
+  walk.simple(ast, {
+    FunctionDeclaration(node) {
+      if (node.id && node.id.type === IDENTIFIER && SELF_GUARDING_BUFFER_FUNCTIONS.has(node.id.name)) {
+        guardedRanges.push({ start: node.start, end: node.end });
+      }
+    },
+    VariableDeclarator(node) {
+      if (
+        node.id.type === IDENTIFIER &&
+        SELF_GUARDING_BUFFER_FUNCTIONS.has(node.id.name) &&
+        node.init &&
+        (node.init.type === FUNCTION_EXPRESSION || node.init.type === ARROW_FUNCTION_EXPRESSION)
+      ) {
+        guardedRanges.push({ start: node.init.start, end: node.init.end });
+      }
+    },
+  });
+}
+
+/**
+ * Finds functions for which every call site is within a guarded range,
+ * and adds their bodies to the guarded ranges array.
+ */
+function addGuardedCallTargets(ast, guardedRanges) {
+  // Map function name -> function node (body range)
+  const funcDefs = new Map();
+  // Map function name -> array of call site nodes
+  const callSites = new Map();
+
+  walk.simple(ast, {
+    FunctionDeclaration(node) {
+      if (node.id && node.id.type === IDENTIFIER) {
+        funcDefs.set(node.id.name, node);
+      }
+    },
+    VariableDeclarator(node) {
+      if (
+        node.id.type === IDENTIFIER &&
+        node.init &&
+        (node.init.type === FUNCTION_EXPRESSION || node.init.type === ARROW_FUNCTION_EXPRESSION)
+      ) {
+        funcDefs.set(node.id.name, node.init);
+      }
+    },
+    CallExpression(node) {
+      if (node.callee.type === IDENTIFIER) {
+        if (!callSites.has(node.callee.name)) {
+          callSites.set(node.callee.name, []);
+        }
+        callSites.get(node.callee.name).push(node);
+      }
+    },
+  });
+
+  function isInGuardedRange(node) {
+    for (let i = 0; i < guardedRanges.length; ++i) {
+      const r = guardedRanges[i];
+      if (node.start >= r.start && node.end <= r.end) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  for (const [name, fnNode] of funcDefs) {
+    const sites = callSites.get(name);
+    if (!sites || sites.length === 0) {
+      continue;
+    }
+    if (sites.every(isInGuardedRange)) {
+      guardedRanges.push({ start: fnNode.start, end: fnNode.end });
+    }
+  }
+}
+
+function extractBindings(pattern, scope) {
+  if (!pattern) {
+    return;
+  }
+  switch (pattern.type) {
+    case IDENTIFIER:
+      scope.add(pattern.name);
+      break;
+    case OBJECT_PATTERN:
+      for (let i = 0; i < pattern.properties.length; ++i) {
+        extractBindings(pattern.properties[i].value || pattern.properties[i].argument, scope);
+      }
+      break;
+    case ARRAY_PATTERN:
+      for (let i = 0; i < pattern.elements.length; ++i) {
+        if (pattern.elements[i]) {
+          extractBindings(pattern.elements[i], scope);
+        }
+      }
+      break;
+    case REST_ELEMENT:
+      extractBindings(pattern.argument, scope);
+      break;
+    case ASSIGNMENT_PATTERN:
+      extractBindings(pattern.left, scope);
+      break;
+  }
+}
+
+function isBufferAssignTarget(node) {
+  if (node.type === IDENTIFIER && node.name === BUFFER) {
+    return true;
+  }
+  if (node.type === MEMBER_EXPRESSION) {
+    if (node.object.type === IDENTIFIER && node.object.name === BUFFER) {
+      return true;
+    }
+    if (node.property.type === IDENTIFIER && node.property.name === BUFFER) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function containsTypeofBuffer(node) {
+  if (
+    node.type === UNARY_EXPRESSION &&
+    node.operator === TYPEOF &&
+    node.argument.type === IDENTIFIER &&
+    node.argument.name === BUFFER
+  ) {
+    return true;
+  }
+  if (node.type === BINARY_EXPRESSION || node.type === LOGICAL_EXPRESSION) {
+    return containsTypeofBuffer(node.left) || containsTypeofBuffer(node.right);
+  }
+  return false;
+}
+
+/**
+ * Names of capability-detector functions whose truthy return implies the
+ * global `Buffer` exists. A call to one of these in a guard condition (e.g.
+ * `if (detectBufferParsing()) { Buffer.from(...) }`) is treated the same as a
+ * `typeof Buffer` check: the detector internally verifies `typeof Buffer` and
+ * returns false when Buffer is absent, so the guarded branch can never run a
+ * bare `Buffer` reference without Buffer present.
+ *
+ * NOTE: unlike `typeof Buffer`, a bundler cannot statically evaluate these
+ * calls, so a branch guarded only by one of them is NOT tree-shaken out of a
+ * browser bundle — it merely cannot crash at runtime. Accepting them here
+ * reflects a deliberate choice to treat such calls as sufficient guards.
+ */
+const GUARD_CALL_FUNCTIONS = new Set(["detectBufferParsing"]);
+
+/**
+ * Whether a call's callee resolves to one of {@link GUARD_CALL_FUNCTIONS}.
+ *
+ * Bundlers rewrite a bare `detectBufferParsing()` into several shapes:
+ *   - `detectBufferParsing()`                       (Identifier callee)
+ *   - `ns.detectBufferParsing()`                    (MemberExpression callee)
+ *   - `(0, ns.detectBufferParsing)()`               (webpack indirect-call via
+ *                                                    SequenceExpression)
+ * so the callee is matched by its final property/identifier name, not by
+ * requiring a plain identifier.
+ */
+function isGuardCallee(callee) {
+  if (!callee) {
+    return false;
+  }
+  if (callee.type === IDENTIFIER) {
+    return GUARD_CALL_FUNCTIONS.has(callee.name);
+  }
+  if (callee.type === MEMBER_EXPRESSION && callee.property && callee.property.type === IDENTIFIER) {
+    return GUARD_CALL_FUNCTIONS.has(callee.property.name);
+  }
+  if (callee.type === "SequenceExpression" && callee.expressions.length > 0) {
+    return isGuardCallee(callee.expressions[callee.expressions.length - 1]);
+  }
+  return false;
+}
+
+/**
+ * Whether `node` is (or contains, within a logical/binary/unary expression) a
+ * call to one of {@link GUARD_CALL_FUNCTIONS}.
+ */
+function containsGuardCall(node) {
+  if (!node) {
+    return false;
+  }
+  if (node.type === "CallExpression" && isGuardCallee(node.callee)) {
+    return true;
+  }
+  if (node.type === BINARY_EXPRESSION || node.type === LOGICAL_EXPRESSION) {
+    return containsGuardCall(node.left) || containsGuardCall(node.right);
+  }
+  if (node.type === UNARY_EXPRESSION) {
+    return containsGuardCall(node.argument);
+  }
+  return false;
+}
+
+function findEnclosingFunction(ancestors) {
+  for (let i = ancestors.length - 1; i >= 0; --i) {
+    const t = ancestors[i].type;
+    if (t === FUNCTION_DECLARATION || t === FUNCTION_EXPRESSION || t === ARROW_FUNCTION_EXPRESSION) {
+      return ancestors[i];
+    }
+  }
+  return null;
+}
+
+module.exports = { findGlobalBufferRefs };

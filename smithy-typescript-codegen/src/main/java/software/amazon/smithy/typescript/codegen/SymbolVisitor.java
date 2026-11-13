@@ -1,32 +1,24 @@
 /*
- * Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
- *
- * Licensed under the Apache License, Version 2.0 (the "License").
- * You may not use this file except in compliance with the License.
- * A copy of the License is located at
- *
- *  http://aws.amazon.com/apache2.0
- *
- * or in the "license" file accompanying this file. This file is distributed
- * on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either
- * express or implied. See the License for the specific language governing
- * permissions and limitations under the License.
+ * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
  */
-
 package software.amazon.smithy.typescript.codegen;
 
 import static java.lang.String.format;
 
-import java.nio.file.Paths;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.logging.Logger;
-import software.amazon.smithy.build.FileManifest;
+import java.util.regex.Matcher;
 import software.amazon.smithy.codegen.core.CodegenException;
 import software.amazon.smithy.codegen.core.ReservedWordSymbolProvider;
 import software.amazon.smithy.codegen.core.ReservedWords;
@@ -43,6 +35,7 @@ import software.amazon.smithy.model.shapes.BooleanShape;
 import software.amazon.smithy.model.shapes.ByteShape;
 import software.amazon.smithy.model.shapes.DocumentShape;
 import software.amazon.smithy.model.shapes.DoubleShape;
+import software.amazon.smithy.model.shapes.EnumShape;
 import software.amazon.smithy.model.shapes.FloatShape;
 import software.amazon.smithy.model.shapes.IntEnumShape;
 import software.amazon.smithy.model.shapes.IntegerShape;
@@ -55,6 +48,7 @@ import software.amazon.smithy.model.shapes.ResourceShape;
 import software.amazon.smithy.model.shapes.ServiceShape;
 import software.amazon.smithy.model.shapes.SetShape;
 import software.amazon.smithy.model.shapes.Shape;
+import software.amazon.smithy.model.shapes.ShapeId;
 import software.amazon.smithy.model.shapes.ShapeType;
 import software.amazon.smithy.model.shapes.ShapeVisitor;
 import software.amazon.smithy.model.shapes.ShortShape;
@@ -64,8 +58,11 @@ import software.amazon.smithy.model.shapes.TimestampShape;
 import software.amazon.smithy.model.shapes.ToShapeId;
 import software.amazon.smithy.model.shapes.UnionShape;
 import software.amazon.smithy.model.traits.EnumTrait;
+import software.amazon.smithy.model.traits.ErrorTrait;
 import software.amazon.smithy.model.traits.MediaTypeTrait;
+import software.amazon.smithy.model.traits.SparseTrait;
 import software.amazon.smithy.model.traits.StreamingTrait;
+import software.amazon.smithy.model.traits.UnitTypeTrait;
 import software.amazon.smithy.utils.SmithyInternalApi;
 import software.amazon.smithy.utils.StringUtils;
 
@@ -83,50 +80,76 @@ final class SymbolVisitor implements SymbolProvider, ShapeVisitor<Symbol> {
 
     private final Model model;
     private final TypeScriptSettings settings;
+    private final Map<ShapeId, String> renames;
     private final ReservedWordSymbolProvider.Escaper escaper;
     private final Set<StructureShape> errorShapes = new HashSet<>();
     private final ModuleNameDelegator moduleNameDelegator;
+    private final boolean createTypeOnlySymbols;
 
     SymbolVisitor(Model model, TypeScriptSettings settings) {
         this(model, settings, ModuleNameDelegator.DEFAULT_CHUNK_SIZE);
     }
 
     SymbolVisitor(Model model, TypeScriptSettings settings, int shapeChunkSize) {
+        this(model, settings, shapeChunkSize, Collections.emptyMap());
+    }
+
+    SymbolVisitor(Model model, TypeScriptSettings settings, Map<ShapeId, String> renames) {
+        this(model, settings, ModuleNameDelegator.DEFAULT_CHUNK_SIZE, renames);
+    }
+
+    SymbolVisitor(Model model, TypeScriptSettings settings, int shapeChunkSize, Map<ShapeId, String> renames) {
         this.model = model;
         this.settings = settings;
+        this.renames = renames;
+        createTypeOnlySymbols = settings.generateClient() || settings.isTypesOnly();
 
         // Load reserved words from a new-line delimited file.
         ReservedWords reservedWords = new ReservedWordsBuilder()
-                .loadWords(TypeScriptCodegenPlugin.class.getResource("reserved-words.txt"))
-                .build();
+            .loadWords(TypeScriptCodegenPlugin.class.getResource("reserved-words.txt"))
+            .build();
         ReservedWords memberReservedWords = new ReservedWordsBuilder()
-                .loadWords(TypeScriptCodegenPlugin.class.getResource("reserved-words-members.txt"))
-                .build();
+            .loadWords(TypeScriptCodegenPlugin.class.getResource("reserved-words-members.txt"))
+            .build();
 
         escaper = ReservedWordSymbolProvider.builder()
-                .nameReservedWords(reservedWords)
-                .memberReservedWords(memberReservedWords)
-                // Only escape words when the symbol has a definition file to
-                // prevent escaping intentional references to built-in types.
-                .escapePredicate((shape, symbol) -> !StringUtils.isEmpty(symbol.getDefinitionFile()))
-                .buildEscaper();
+            .nameReservedWords(reservedWords)
+            .memberReservedWords(memberReservedWords)
+            // Only escape words when the symbol has a definition file to
+            // prevent escaping intentional references to built-in types.
+            .escapePredicate((shape, symbol) -> !StringUtils.isEmpty(symbol.getDefinitionFile()))
+            .buildEscaper();
 
         // Get each structure that's used an error.
-        OperationIndex operationIndex = OperationIndex.of(model);
-        model.shapes(OperationShape.class).forEach(operationShape -> {
-            errorShapes.addAll(operationIndex.getErrors(operationShape, settings.getService()));
-        });
+        if (settings.getOptionalService().isPresent()) {
+            OperationIndex operationIndex = OperationIndex.of(model);
+            model
+                .shapes(OperationShape.class)
+                .forEach(operationShape -> {
+                    errorShapes.addAll(operationIndex.getErrors(operationShape, settings.getService()));
+                });
+        } else {
+            model
+                .shapes(StructureShape.class)
+                .filter(s -> s.hasTrait(ErrorTrait.class))
+                .forEach(errorShapes::add);
+        }
 
         moduleNameDelegator = new ModuleNameDelegator(shapeChunkSize);
     }
 
-    static void writeModelIndex(Collection<Shape> shapes, SymbolProvider symbolProvider, FileManifest fileManifest) {
-        ModuleNameDelegator.writeModelIndex(shapes, symbolProvider, fileManifest);
+    static TypeScriptWriter modelIndexer(Collection<Shape> shapes, SymbolProvider symbolProvider) {
+        return ModuleNameDelegator.modelIndexer(shapes, symbolProvider);
     }
 
     @Override
     public Symbol toSymbol(Shape shape) {
-        Symbol symbol = shape.accept(this);
+        boolean typeOnly = createTypeOnlySymbols;
+        boolean isError = shape.asStructureShape().isPresent() && shape.hasTrait(ErrorTrait.class);
+        if (shape.isOperationShape() || shape.isResourceShape() || isError || shape.isServiceShape()) {
+            typeOnly = false;
+        }
+        Symbol symbol = shape.accept(this).toBuilder().putProperty("typeOnly", typeOnly).build();
         LOGGER.fine(() -> "Creating symbol from " + shape + ": " + symbol);
         return escaper.escapeSymbol(shape, symbol);
     }
@@ -140,9 +163,16 @@ final class SymbolVisitor implements SymbolProvider, ShapeVisitor<Symbol> {
     public Symbol blobShape(BlobShape shape) {
         if (shape.hasTrait(StreamingTrait.class)) {
             // Note: `Readable` needs an import and a dependency.
-            return createSymbolBuilder(shape, "Readable | ReadableStream | Blob", null)
-                    .addReference(Symbol.builder().name("Readable").namespace("stream", "/").build())
-                    .build();
+            return createSymbolBuilder(shape, "StreamingBlobTypes", null)
+                .addReference(
+                    Symbol.builder()
+                        .addDependency(TypeScriptDependency.SMITHY_TYPES)
+                        .name("StreamingBlobTypes")
+                        .namespace("@smithy/types", "/")
+                        .putProperty("typeOnly", createTypeOnlySymbols)
+                        .build()
+                )
+                .build();
         }
 
         return createSymbolBuilder(shape, "Uint8Array").build();
@@ -155,18 +185,23 @@ final class SymbolVisitor implements SymbolProvider, ShapeVisitor<Symbol> {
 
     @Override
     public Symbol listShape(ListShape shape) {
+        boolean sparse = shape.hasTrait(SparseTrait.ID);
         Symbol reference = toSymbol(shape.getMember());
-        return createSymbolBuilder(shape, format("(%s)[]", reference.getName()), null)
-                .addReference(reference)
-                .build();
+        String valueType = (sparse ? "(" : "") + reference.getName() + (sparse ? " | null)" : "");
+
+        return createSymbolBuilder(shape, format("%s[]", valueType), null)
+            .addReference(reference)
+            .putProperty("typeOnly", createTypeOnlySymbols)
+            .build();
     }
 
     @Override
     public Symbol setShape(SetShape shape) {
         Symbol reference = toSymbol(shape.getMember());
-        return createSymbolBuilder(shape, format("(%s)[]", reference.getName()), null)
-                .addReference(reference)
-                .build();
+        return createSymbolBuilder(shape, format("%s[]", reference.getName()), null)
+            .addReference(reference)
+            .putProperty("typeOnly", createTypeOnlySymbols)
+            .build();
     }
 
     /**
@@ -184,10 +219,23 @@ final class SymbolVisitor implements SymbolProvider, ShapeVisitor<Symbol> {
      */
     @Override
     public Symbol mapShape(MapShape shape) {
-        Symbol reference = toSymbol(shape.getValue());
-        return createSymbolBuilder(shape, format("Record<string, %s>", reference.getName()), null)
-                .addReference(reference)
-                .build();
+        Symbol key = toSymbol(shape.getKey());
+        Symbol value = toSymbol(shape.getValue());
+
+        boolean stringKey = key.toString().equals("string");
+
+        boolean sparse = shape.hasTrait(SparseTrait.ID);
+        String valueType = value.getName() + (sparse ? " | null" : "");
+
+        return createSymbolBuilder(
+            shape,
+            format(stringKey ? "Record<%s, %s>" : "Partial<Record<%s, %s>>", key.getName(), valueType),
+            null
+        )
+            .addReference(key)
+            .addReference(value)
+            .putProperty("typeOnly", createTypeOnlySymbols)
+            .build();
     }
 
     @Override
@@ -226,34 +274,50 @@ final class SymbolVisitor implements SymbolProvider, ShapeVisitor<Symbol> {
 
     @Override
     public Symbol bigIntegerShape(BigIntegerShape shape) {
-        // BigInt is not supported across all environments, use big.js instead.
+        if ("native".equals(settings.getBigNumberMode())) {
+            return createSymbolBuilder(shape, "bigint").build();
+        }
         return createBigJsSymbol(shape);
     }
 
     @Override
     public Symbol bigDecimalShape(BigDecimalShape shape) {
+        if ("native".equals(settings.getBigNumberMode())) {
+            return createSymbolBuilder(shape, "NumericValue", null)
+                .addReference(
+                    Symbol.builder()
+                        .addDependency(TypeScriptDependency.SMITHY_CORE)
+                        .name("NumericValue")
+                        .putProperty("typeOnly", createTypeOnlySymbols)
+                        .namespace("@smithy/core/serde", "/")
+                        .build()
+                )
+                .build();
+        }
         return createBigJsSymbol(shape);
     }
 
     private Symbol createBigJsSymbol(Shape shape) {
-        return createSymbolBuilder(shape, "Big", TypeScriptDependency.TYPES_BIG_JS.packageName)
-                .addDependency(TypeScriptDependency.TYPES_BIG_JS)
-                .addDependency(TypeScriptDependency.BIG_JS)
-                .build();
+        return createSymbolBuilder(shape, "Big", TypeScriptDependency.BIG_JS.packageName)
+            .addDependency(TypeScriptDependency.TYPES_BIG_JS)
+            .addDependency(TypeScriptDependency.BIG_JS)
+            .build();
     }
 
     @Override
     public Symbol documentShape(DocumentShape shape) {
         Symbol.Builder builder = createSymbolBuilder(shape, "__DocumentType");
         Symbol importSymbol = Symbol.builder()
-                .name("DocumentType")
-                .namespace(TypeScriptDependency.AWS_SDK_TYPES.packageName, "/")
-                .build();
+            .name("DocumentType")
+            .namespace(TypeScriptDependency.SMITHY_TYPES.packageName, "/")
+            .putProperty("typeOnly", createTypeOnlySymbols)
+            .build();
         SymbolReference reference = SymbolReference.builder()
-                .symbol(importSymbol)
-                .alias("__DocumentType")
-                .options(SymbolReference.ContextOption.USE)
-                .build();
+            .symbol(importSymbol)
+            .alias("__DocumentType")
+            .options(SymbolReference.ContextOption.USE)
+            .putProperty("typeOnly", createTypeOnlySymbols)
+            .build();
         return builder.addReference(reference).build();
     }
 
@@ -262,10 +326,16 @@ final class SymbolVisitor implements SymbolProvider, ShapeVisitor<Symbol> {
         String commandName = flattenShapeName(shape) + "Command";
         String moduleName = moduleNameDelegator.formatModuleName(shape, commandName);
         Symbol intermediate = createGeneratedSymbolBuilder(shape, commandName, moduleName).build();
-        Symbol.Builder builder = intermediate.toBuilder();
+        Symbol.Builder builder = intermediate.toBuilder().putProperty("typeOnly", false);
         // Add input and output type symbols (XCommandInput / XCommandOutput).
-        builder.putProperty("inputType", intermediate.toBuilder().name(commandName + "Input").build());
-        builder.putProperty("outputType", intermediate.toBuilder().name(commandName + "Output").build());
+        builder.putProperty(
+            "inputType",
+            intermediate.toBuilder().putProperty("typeOnly", createTypeOnlySymbols).name(commandName + "Input").build()
+        );
+        builder.putProperty(
+            "outputType",
+            intermediate.toBuilder().putProperty("typeOnly", createTypeOnlySymbols).name(commandName + "Output").build()
+        );
         return builder.build();
     }
 
@@ -282,8 +352,12 @@ final class SymbolVisitor implements SymbolProvider, ShapeVisitor<Symbol> {
         if (mediaTypeTrait.isPresent()) {
             String mediaType = mediaTypeTrait.get().getValue();
             if (CodegenUtils.isJsonMediaType(mediaType)) {
-                Symbol.Builder builder = createSymbolBuilder(shape, "__LazyJsonString | string");
-                return addSmithyUseImport(builder, "LazyJsonString", "__LazyJsonString").build();
+                Symbol.Builder builder = createSymbolBuilder(shape, "__AutomaticJsonStringConversion | string");
+                return addSmithyUseImport(
+                    builder,
+                    "AutomaticJsonStringConversion",
+                    "__AutomaticJsonStringConversion"
+                ).build();
             } else {
                 LOGGER.warning(() -> "Found unsupported mediatype " + mediaType + " on String shape: " + shape);
             }
@@ -293,14 +367,20 @@ final class SymbolVisitor implements SymbolProvider, ShapeVisitor<Symbol> {
     }
 
     @Override
+    public Symbol enumShape(EnumShape shape) {
+        return stringShape(shape).toBuilder().putProperty("typeOnly", true).build();
+    }
+
+    @Override
     public Symbol intEnumShape(IntEnumShape shape) {
-        return createObjectSymbolBuilder(shape).build();
+        return createObjectSymbolBuilder(shape).putProperty("typeOnly", true).build();
     }
 
     private Symbol createEnumSymbol(StringShape shape, EnumTrait enumTrait) {
         return createObjectSymbolBuilder(shape)
-                .putProperty(EnumTrait.class.getName(), enumTrait)
-                .build();
+            .putProperty(EnumTrait.class.getName(), enumTrait)
+            .putProperty("typeOnly", true)
+            .build();
     }
 
     @Override
@@ -312,7 +392,7 @@ final class SymbolVisitor implements SymbolProvider, ShapeVisitor<Symbol> {
     public Symbol serviceShape(ServiceShape shape) {
         String name = StringUtils.capitalize(shape.getId().getName(shape)) + "Client";
         String moduleName = moduleNameDelegator.formatModuleName(shape, name);
-        return createGeneratedSymbolBuilder(shape, name, moduleName).build();
+        return createGeneratedSymbolBuilder(shape, name, moduleName).putProperty("typeOnly", false).build();
     }
 
     @Override
@@ -321,15 +401,12 @@ final class SymbolVisitor implements SymbolProvider, ShapeVisitor<Symbol> {
     }
 
     private Symbol.Builder addSmithyUseImport(Symbol.Builder builder, String name, String as) {
-        Symbol importSymbol = Symbol.builder()
-                .name(name)
-                .namespace("@aws-sdk/smithy-client", "/")
-                .build();
+        Symbol importSymbol = Symbol.builder().name(name).namespace("@smithy/core/serde", "/").build();
         SymbolReference reference = SymbolReference.builder()
-                .symbol(importSymbol)
-                .alias(as)
-                .options(SymbolReference.ContextOption.USE)
-                .build();
+            .symbol(importSymbol)
+            .alias(as)
+            .options(SymbolReference.ContextOption.USE)
+            .build();
         return builder.addReference(reference);
     }
 
@@ -340,15 +417,12 @@ final class SymbolVisitor implements SymbolProvider, ShapeVisitor<Symbol> {
 
     @Override
     public Symbol memberShape(MemberShape shape) {
-        Shape targetShape = model.getShape(shape.getTarget())
-                .orElseThrow(() -> new CodegenException("Shape not found: " + shape.getTarget()));
+        Shape targetShape = model
+            .getShape(shape.getTarget())
+            .orElseThrow(() -> new CodegenException("Shape not found: " + shape.getTarget()));
         Symbol targetSymbol = toSymbol(targetShape);
 
-        if (targetShape.isIntEnumShape()) {
-            return createMemberSymbolWithIntEnumTarget(targetSymbol);
-        }
-
-        if (targetSymbol.getProperties().containsKey(EnumTrait.class.getName())) {
+        if (targetSymbol.getProperties().containsKey(EnumTrait.class.getName()) || targetShape.isIntEnumShape()) {
             return createMemberSymbolWithEnumTarget(targetSymbol);
         }
 
@@ -362,34 +436,28 @@ final class SymbolVisitor implements SymbolProvider, ShapeVisitor<Symbol> {
         return targetSymbol;
     }
 
-    // Enums are considered "open", meaning it is a backward compatible change to add new
-    // members. Adding the `string` variant allows for previously generated clients to be
-    // able to handle unknown enum values that may be added in the future.
+    // Enums were considered "open" with the union `| string` or `| number`, meaning it was a backwards
+    // compatible change to add new members. This behavior was later removed to improve the helpfulness
+    // of closed enumerated union types.
+    // For overrides, users should use available type system overrides such as "as any" or
+    // pragma comments.
     private Symbol createMemberSymbolWithEnumTarget(Symbol targetSymbol) {
-        return targetSymbol.toBuilder()
-                .namespace(null, "/")
-                .name(targetSymbol.getName() + " | string")
-                .addReference(targetSymbol)
-                .build();
-    }
-
-    // IntEnums are considered "open", meaning it is a backward compatible change to add new
-    // members. Adding the `number` variant allows for previously generated clients to be
-    // able to handle unknown int enum values that may be added in the future.
-    private Symbol createMemberSymbolWithIntEnumTarget(Symbol targetSymbol) {
-        return targetSymbol.toBuilder()
-                .namespace(null, "/")
-                .name(targetSymbol.getName() + " | number")
-                .addReference(targetSymbol)
-                .build();
+        return targetSymbol
+            .toBuilder()
+            .namespace(null, "/")
+            .name(targetSymbol.getName())
+            .addReference(targetSymbol)
+            .build();
     }
 
     private Symbol createMemberSymbolWithEventStream(Symbol targetSymbol) {
-        return targetSymbol.toBuilder()
-                .namespace(null, "/")
-                .name(String.format("AsyncIterable<%s>", targetSymbol.getName()))
-                .addReference(targetSymbol)
-                .build();
+        return targetSymbol
+            .toBuilder()
+            .putProperty("typeOnly", createTypeOnlySymbols)
+            .namespace(null, "/")
+            .name(String.format("AsyncIterable<%s>", targetSymbol.getName()))
+            .addReference(targetSymbol)
+            .build();
     }
 
     @Override
@@ -398,8 +466,13 @@ final class SymbolVisitor implements SymbolProvider, ShapeVisitor<Symbol> {
     }
 
     private String flattenShapeName(ToShapeId id) {
+        ShapeId shapeId = id.toShapeId();
+        if (!renames.isEmpty() || settings.getOptionalService().isEmpty()) {
+            String renamed = renames.get(shapeId);
+            return StringUtils.capitalize(renamed != null ? renamed : shapeId.getName());
+        }
         ServiceShape serviceShape = model.expectShape(settings.getService(), ServiceShape.class);
-        return StringUtils.capitalize(id.toShapeId().getName(serviceShape));
+        return StringUtils.capitalize(shapeId.getName(serviceShape));
     }
 
     private Symbol.Builder createObjectSymbolBuilder(Shape shape) {
@@ -413,17 +486,13 @@ final class SymbolVisitor implements SymbolProvider, ShapeVisitor<Symbol> {
     }
 
     private Symbol.Builder createSymbolBuilder(Shape shape, String typeName, String namespace) {
-        return Symbol.builder()
-                .putProperty("shape", shape)
-                .name(typeName)
-                .namespace(namespace, "/");
+        return Symbol.builder().putProperty("shape", shape).name(typeName).namespace(namespace, "/");
     }
 
     private Symbol.Builder createGeneratedSymbolBuilder(Shape shape, String typeName, String namespace) {
-        String prefixedNamespace = Paths.get(".", CodegenUtils.SOURCE_FOLDER,
-            (namespace.startsWith(".") ? namespace.substring(1) : namespace)).toString();
-        return createSymbolBuilder(shape, typeName, prefixedNamespace)
-                .definitionFile(toFilename(prefixedNamespace));
+        String trimmedNamespace = namespace.startsWith("./") ? namespace.substring(2) : namespace;
+        String prefixedNamespace = String.join("/", ".", CodegenUtils.SOURCE_FOLDER, trimmedNamespace);
+        return createSymbolBuilder(shape, typeName, prefixedNamespace).definitionFile(toFilename(prefixedNamespace));
     }
 
     private String toFilename(String namespace) {
@@ -435,6 +504,7 @@ final class SymbolVisitor implements SymbolProvider, ShapeVisitor<Symbol> {
      * It will break the models into multiple files to prevent it getting too big.
      */
     static final class ModuleNameDelegator {
+
         static final int DEFAULT_CHUNK_SIZE = 300;
         static final String SHAPE_NAMESPACE_PREFIX = "models";
 
@@ -450,38 +520,92 @@ final class SymbolVisitor implements SymbolProvider, ShapeVisitor<Symbol> {
         public String formatModuleName(Shape shape, String name) {
             // All shapes except for the service and operations are stored in models.
             if (shape.getType() == ShapeType.SERVICE) {
-                return Paths.get(".", name).toString();
+                return String.join("/", ".", name);
             } else if (shape.getType() == ShapeType.OPERATION) {
-                return Paths.get(".", CommandGenerator.COMMANDS_FOLDER, name).toString();
+                return String.join("/", ".", CommandGenerator.COMMANDS_FOLDER, name);
             } else if (visitedModels.containsKey(shape)) {
                 return visitedModels.get(shape);
             }
-            // Add models into buckets no bigger than chunk size.
-            String path = Paths.get(".", SHAPE_NAMESPACE_PREFIX, "models_" + bucketCount).toString();
-            visitedModels.put(shape, path);
-            currentBucketSize++;
-            if (currentBucketSize == chunkSize) {
-                bucketCount++;
-                currentBucketSize = 0;
+
+            String path;
+            if (shape.isEnumShape() || shape.isIntEnumShape() || shape.hasTrait(EnumTrait.class)) {
+                path = String.join("/", ".", SHAPE_NAMESPACE_PREFIX, "enums");
+            } else if (shape.isStructureShape() && shape.hasTrait(ErrorTrait.class)) {
+                path = String.join("/", ".", SHAPE_NAMESPACE_PREFIX, "errors");
+            } else if (shape.getId().equals(UnitTypeTrait.UNIT) || shape.isResourceShape()) {
+                // Unit or Resource shapes should only be put in the zero bucket, since they do not
+                // generate anything. They also do not contribute to bucket size.
+                path = String.join("/", ".", SHAPE_NAMESPACE_PREFIX, "models_0");
+            } else {
+                path = String.join("/", ".", SHAPE_NAMESPACE_PREFIX, "models_" + bucketCount);
+                currentBucketSize++;
+                if (currentBucketSize == chunkSize) {
+                    bucketCount++;
+                    currentBucketSize = 0;
+                }
             }
+            visitedModels.put(shape, path);
             return path;
         }
 
-        static void writeModelIndex(Collection<Shape> shapes, SymbolProvider symbolProvider,
-                                    FileManifest fileManifest) {
+        static TypeScriptWriter modelIndexer(Collection<Shape> shapes, SymbolProvider symbolProvider) {
             TypeScriptWriter writer = new TypeScriptWriter("");
-            String modelPrefix = Paths.get(".", CodegenUtils.SOURCE_FOLDER, SHAPE_NAMESPACE_PREFIX).toString();
-            shapes.stream()
-                    .map(shape -> symbolProvider.toSymbol(shape).getNamespace())
-                    .filter(namespace -> namespace.startsWith(modelPrefix))
-                    .distinct()
-                    .sorted(Comparator.naturalOrder())
-                    .forEach(namespace -> writer.write(
-                            "export * from $S;", namespace.replaceFirst(modelPrefix, ".")));
-            fileManifest.writeFile(
-                    Paths.get(CodegenUtils.SOURCE_FOLDER, SHAPE_NAMESPACE_PREFIX, "index.ts").toString(),
-                    writer.toString());
-        }
+            String modelPrefix = String.join("/", ".", CodegenUtils.SOURCE_FOLDER, SHAPE_NAMESPACE_PREFIX);
+            List<String> collectedModelNamespaces = shapes
+                .stream()
+                .map(shape -> symbolProvider.toSymbol(shape).getNamespace())
+                .filter(namespace -> namespace.startsWith(modelPrefix))
+                .distinct()
+                .sorted(Comparator.naturalOrder())
+                .map(
+                    namespace -> namespace.replaceFirst(
+                        Matcher.quoteReplacement(modelPrefix),
+                        String.join("/", ".", SHAPE_NAMESPACE_PREFIX)
+                    )
+                )
+                .toList();
 
+            // Export empty model index if no other files are present.
+            if (collectedModelNamespaces.isEmpty()) {
+                writer.write("export {};");
+            } else {
+                for (String namespace : collectedModelNamespaces) {
+                    boolean typesOnly = namespace.contains("models_");
+                    if (!typesOnly) {
+                        writer.write("export * from $S;", namespace);
+                    }
+                }
+            }
+
+            // export types by name only
+            Map<String, TreeSet<String>> namespaceToShapes = new TreeMap<>();
+
+            for (Shape shape : shapes) {
+                if (shape.isStructureShape() && !shape.hasTrait(ErrorTrait.class)) {
+                    Symbol symbol = symbolProvider.toSymbol(shape);
+                    String namespace = symbol
+                        .getNamespace()
+                        .replaceFirst(
+                            Matcher.quoteReplacement(String.join("/", ".", CodegenUtils.SOURCE_FOLDER)),
+                            "."
+                        );
+                    namespaceToShapes.computeIfAbsent(namespace, k -> new TreeSet<>());
+                    namespaceToShapes.get(namespace).add(symbol.getName());
+                }
+            }
+
+            for (Map.Entry<String, TreeSet<String>> entry : namespaceToShapes.entrySet()) {
+                String namespace = entry.getKey();
+                // server models have runtime components and should therefore be
+                // exported as is, rather than types-only.
+                writer.write(
+                    """
+                    export * from $S;""",
+                    namespace
+                );
+            }
+
+            return writer;
+        }
     }
 }

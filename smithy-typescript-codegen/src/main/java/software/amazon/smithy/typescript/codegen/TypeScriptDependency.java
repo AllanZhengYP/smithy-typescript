@@ -1,18 +1,7 @@
 /*
- * Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
- *
- * Licensed under the Apache License, Version 2.0 (the "License").
- * You may not use this file except in compliance with the License.
- * A copy of the License is located at
- *
- *  http://aws.amazon.com/apache2.0
- *
- * or in the "license" file accompanying this file. This file is distributed
- * on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either
- * express or implied. See the License for the specific language governing
- * permissions and limitations under the License.
+ * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
  */
-
 package software.amazon.smithy.typescript.codegen;
 
 import java.io.BufferedReader;
@@ -30,82 +19,141 @@ import java.util.Properties;
 import java.util.logging.Logger;
 import software.amazon.smithy.codegen.core.Symbol;
 import software.amazon.smithy.codegen.core.SymbolDependency;
-import software.amazon.smithy.codegen.core.SymbolDependencyContainer;
 import software.amazon.smithy.utils.SmithyUnstableApi;
 
 /**
  * An enum of all of the built-in dependencies managed by this package.
  */
 @SmithyUnstableApi
-public enum TypeScriptDependency implements SymbolDependencyContainer {
-
-    AWS_SDK_CLIENT_DOCGEN("devDependencies", "@aws-sdk/service-client-documentation-generator", true),
-    AWS_SDK_TYPES("dependencies", "@aws-sdk/types", true),
-    AWS_SMITHY_CLIENT("dependencies", "@aws-sdk/smithy-client", true),
-    INVALID_DEPENDENCY("dependencies", "@aws-sdk/invalid-dependency", true),
-    CONFIG_RESOLVER("dependencies", "@aws-sdk/config-resolver", true),
-    TYPES_NODE("devDependencies", "@types/node", "^12.7.5", true),
-
-    MIDDLEWARE_CONTENT_LENGTH("dependencies", "@aws-sdk/middleware-content-length", true),
-    MIDDLEWARE_SERDE("dependencies", "@aws-sdk/middleware-serde", true),
-    MIDDLEWARE_RETRY("dependencies", "@aws-sdk/middleware-retry", true),
-    MIDDLEWARE_STACK("dependencies", "@aws-sdk/middleware-stack", true),
-    MIDDLEWARE_ENDPOINTS_V2("dependencies", "@aws-sdk/middleware-endpoint", false),
-
-    AWS_CRYPTO_SHA256_BROWSER("dependencies", "@aws-crypto/sha256-browser", "2.0.0", true),
-    AWS_CRYPTO_SHA256_JS("dependencies", "@aws-crypto/sha256-js", "2.0.0", true),
-    AWS_SDK_HASH_NODE("dependencies", "@aws-sdk/hash-node", true),
-
-    AWS_SDK_URL_PARSER("dependencies", "@aws-sdk/url-parser", true),
-
-    AWS_SDK_UTIL_BASE64_BROWSER("dependencies", "@aws-sdk/util-base64-browser", true),
-    AWS_SDK_UTIL_BASE64_NODE("dependencies", "@aws-sdk/util-base64-node", true),
-
-    AWS_SDK_UTIL_BODY_LENGTH_BROWSER("dependencies", "@aws-sdk/util-body-length-browser", true),
-    AWS_SDK_UTIL_BODY_LENGTH_NODE("dependencies", "@aws-sdk/util-body-length-node", true),
-
-    AWS_SDK_UTIL_UTF8_BROWSER("dependencies", "@aws-sdk/util-utf8-browser", true),
-    AWS_SDK_UTIL_UTF8_NODE("dependencies", "@aws-sdk/util-utf8-node", true),
-
-    AWS_SDK_UTIL_WAITERS("dependencies", "@aws-sdk/util-waiter",  false),
-
-    AWS_SDK_UTIL_DEFAULTS_MODE_NODE("dependencies", "@aws-sdk/util-defaults-mode-node", true),
-    AWS_SDK_UTIL_DEFAULTS_MODE_BROWSER("dependencies", "@aws-sdk/util-defaults-mode-browser", true),
-
-    // Conditionally added when httpChecksumRequired trait exists
-    MD5_BROWSER("dependencies", "@aws-sdk/md5-js", false),
-    STREAM_HASHER_NODE("dependencies", "@aws-sdk/hash-stream-node", false),
-    STREAM_HASHER_BROWSER("dependencies", "@aws-sdk/hash-blob-browser", false),
-    BODY_CHECKSUM("dependencies", "@aws-sdk/middleware-apply-body-checksum", false),
-
-    // Conditionally added when using an HTTP application protocol.
-    AWS_SDK_PROTOCOL_HTTP("dependencies", "@aws-sdk/protocol-http", false),
-    AWS_SDK_FETCH_HTTP_HANDLER("dependencies", "@aws-sdk/fetch-http-handler", false),
-    AWS_SDK_NODE_HTTP_HANDLER("dependencies", "@aws-sdk/node-http-handler", false),
-
-    // Conditionally added if a event stream shape is found anywhere in the model
-    AWS_SDK_EVENTSTREAM_SERDE_CONFIG_RESOLVER("dependencies", "@aws-sdk/eventstream-serde-config-resolver",
-            false),
-    AWS_SDK_EVENTSTREAM_SERDE_NODE("dependencies", "@aws-sdk/eventstream-serde-node", false),
-    AWS_SDK_EVENTSTREAM_SERDE_BROWSER("dependencies", "@aws-sdk/eventstream-serde-browser", false),
-
-    // Conditionally added if a big decimal shape is found in a model.
-    BIG_JS("dependencies", "big.js", "^5.2.2", false),
-    TYPES_BIG_JS("devDependencies", "@types/big.js", "^4.0.5", false),
-
-    // Conditionally added when interacting with specific protocol test bodyMediaType values.
-    AWS_SDK_QUERYSTRING_BUILDER("dependencies", "@aws-sdk/querystring-builder", false),
-
-    // Conditionally added when XML parser needs to be used.
-    XML_PARSER("dependencies", "fast-xml-parser", "4.0.11", false),
+public enum TypeScriptDependency implements Dependency {
+    SMITHY_TYPES("dependencies", "@smithy/types", true),
+    SMITHY_CORE("dependencies", "@smithy/core", false),
+    AWS_SDK_FETCH_HTTP_HANDLER("dependencies", "@smithy/fetch-http-handler", false),
+    AWS_SDK_NODE_HTTP_HANDLER("dependencies", "@smithy/node-http-handler", false),
+    BIG_JS("dependencies", "big.js", "^6.0.0", false),
+    BODY_CHECKSUM("dependencies", "@smithy/middleware-apply-body-checksum", false),
     HTML_ENTITIES("dependencies", "entities", "2.2.0", false),
+    MIDDLEWARE_COMPRESSION("dependencies", "@smithy/middleware-compression", false),
+    SIGNATURE_V4("dependencies", "@smithy/signature-v4", false),
+    TYPES_BIG_JS("devDependencies", "@types/big.js", "^6.0.0", false),
+    TYPES_NODE("devDependencies", "@types/node", "^20.14.8", true),
+    XML_PARSER("dependencies", "fast-xml-parser", "5.7.1", false),
 
-    // Conditionally added when streaming blob response payload exists.
-    UTIL_STREAM_NODE("dependencies", "@aws-sdk/util-stream-node", false),
-    UTIL_STREAM_BROWSER("dependencies", "@aws-sdk/util-stream-browser", false),
+    // todo: core/endpoints
+    @Deprecated
+    MIDDLEWARE_ENDPOINTS_V2("dependencies", "@smithy/middleware-endpoint", "0.0.0", false),
+    @Deprecated
+    UTIL_ENDPOINTS("dependencies", "@smithy/util-endpoints", "0.0.0", false),
 
-    // Server dependency for SSDKs
-    SERVER_COMMON("dependencies", "@aws-smithy/server-common", "1.0.0-alpha.6", false);
+    // todo: core/retry
+    @Deprecated
+    MIDDLEWARE_RETRY("dependencies", "@smithy/middleware-retry", "0.0.0", false),
+    @Deprecated
+    UTIL_RETRY("dependencies", "@smithy/util-retry", "0.0.0", false),
+
+    SERVER_COMMON("dependencies", "@smithy/server-common", false),
+    SMITHY_TYPECHECK("dependencies", "@smithy/typecheck", false),
+    SNAPSHOTS("devDependencies", "@smithy/snapshot-testing", false),
+    VITEST("devDependencies", "vitest", "^4.0.17", false),
+
+    // Deprecated: consolidated into @smithy/core submodules.
+    // Retained for backward compatibility with downstream codegen.
+    @Deprecated
+    AWS_SDK_HASH_NODE("dependencies", "@smithy/hash-node", "0.0.0", false),
+    @Deprecated
+    AWS_SDK_QUERYSTRING_BUILDER("dependencies", "@smithy/querystring-builder", "0.0.0", false),
+    @Deprecated
+    AWS_SDK_TYPES("dependencies", "@aws-sdk/types", "0.0.0", false),
+    @Deprecated
+    AWS_SDK_URL_PARSER("dependencies", "@smithy/url-parser", "0.0.0", false),
+    @Deprecated
+    AWS_SDK_UTIL_BODY_LENGTH_BROWSER("dependencies", "@smithy/util-body-length-browser", "0.0.0", false),
+    @Deprecated
+    AWS_SDK_UTIL_BODY_LENGTH_NODE("dependencies", "@smithy/util-body-length-node", "0.0.0", false),
+    @Deprecated
+    AWS_SDK_UTIL_DEFAULTS_MODE_BROWSER("dependencies", "@smithy/util-defaults-mode-browser", "0.0.0", false),
+    @Deprecated
+    AWS_SDK_UTIL_DEFAULTS_MODE_NODE("dependencies", "@smithy/util-defaults-mode-node", "0.0.0", false),
+    @Deprecated
+    AWS_SDK_UTIL_ENDPOINTS("dependencies", "@aws-sdk/util-endpoints", "0.0.0", false),
+    @Deprecated
+    AWS_SDK_UTIL_MIDDLEWARE("dependencies", "@smithy/util-middleware", "0.0.0", false),
+    @Deprecated
+    AWS_SDK_UTIL_WAITERS("dependencies", "@smithy/util-waiter", "0.0.0", false),
+    @Deprecated
+    AWS_SMITHY_CLIENT("dependencies", "@smithy/smithy-client", "0.0.0", false),
+    @Deprecated
+    CONFIG_RESOLVER("dependencies", "@smithy/config-resolver", "0.0.0", false),
+    @Deprecated
+    INVALID_DEPENDENCY("dependencies", "@smithy/invalid-dependency", "0.0.0", false),
+    @Deprecated
+    MD5_BROWSER("dependencies", "@smithy/md5-js", "0.0.0", false),
+    @Deprecated
+    MIDDLEWARE_CONTENT_LENGTH("dependencies", "@smithy/middleware-content-length", "0.0.0", false),
+    @Deprecated
+    MIDDLEWARE_SERDE("dependencies", "@smithy/middleware-serde", "0.0.0", false),
+    @Deprecated
+    MIDDLEWARE_STACK("dependencies", "@smithy/middleware-stack", "0.0.0", false),
+    @Deprecated
+    NODE_CONFIG_PROVIDER("dependencies", "@smithy/node-config-provider", "0.0.0", false),
+    @Deprecated
+    PROTOCOL_HTTP("dependencies", "@smithy/protocol-http", "0.0.0", false),
+    @Deprecated
+    SMITHY_UUID("dependencies", "@smithy/uuid", "0.0.0", false),
+    @Deprecated
+    STREAM_HASHER_BROWSER("dependencies", "@smithy/hash-blob-browser", "0.0.0", false),
+    @Deprecated
+    STREAM_HASHER_NODE("dependencies", "@smithy/hash-stream-node", "0.0.0", false),
+    @Deprecated
+    UTIL_MIDDLEWARE("dependencies", "@smithy/util-middleware", "0.0.0", false),
+    @Deprecated
+    UTIL_STREAM("dependencies", "@smithy/util-stream", "0.0.0", false),
+    @Deprecated
+    UTIL_STREAM_BROWSER("dependencies", "@smithy/util-stream-browser", "0.0.0", false),
+    @Deprecated
+    UTIL_STREAM_NODE("dependencies", "@smithy/util-stream-node", "0.0.0", false),
+    @Deprecated
+    UUID("dependencies", "uuid", "0.0.0", false),
+    @Deprecated
+    UUID_TYPES("dependencies", "@types/uuid", "0.0.0", false),
+    @Deprecated
+    AWS_SDK_EVENTSTREAM_CODEC("dependencies", "@smithy/eventstream-codec", "0.0.0", false),
+    @Deprecated
+    AWS_SDK_EVENTSTREAM_SERDE_BROWSER("dependencies", "@smithy/eventstream-serde-browser", "0.0.0", false),
+    @Deprecated
+    AWS_SDK_EVENTSTREAM_SERDE_CONFIG_RESOLVER(
+        "dependencies",
+        "@smithy/eventstream-serde-config-resolver",
+        "0.0.0",
+        false
+    ),
+    @Deprecated
+    AWS_SDK_EVENTSTREAM_SERDE_NODE("dependencies", "@smithy/eventstream-serde-node", "0.0.0", false),
+    /**
+     * If typedoc is desired, apply it manually to the generated package.
+     * @deprecated automatic typedoc generation is no longer supported.
+     */
+    @Deprecated
+    TYPEDOC("devDependencies", "typedoc", "0.23.23", false),
+    /**
+    * @deprecated Use {@code @smithy/core/checksum} via {@link SmithyCoreSubmodules#CHECKSUM} instead.
+    */
+    @Deprecated
+    AWS_CRYPTO_SHA256_BROWSER("dependencies", "@aws-crypto/sha256-browser", "5.2.0", false),
+    /**
+     * @deprecated Use {@code @smithy/core/checksum} via {@link SmithyCoreSubmodules#CHECKSUM} instead.
+     */
+    @Deprecated
+    AWS_CRYPTO_SHA256_JS("dependencies", "@aws-crypto/sha256-js", "5.2.0", false),
+    /**
+     * If typedoc is desired, apply it manually to the generated package.
+     * @deprecated automatic typedoc generation is no longer supported.
+     */
+    @Deprecated
+    AWS_SDK_CLIENT_DOCGEN("devDependencies", "@smithy/service-client-documentation-generator", false),
+    // devtools
+    @Deprecated
+    EXPERIMENTAL_IDENTITY_AND_AUTH("dependencies", "@smithy/experimental-identity-and-auth", false);
 
     public static final String NORMAL_DEPENDENCY = "dependencies";
     public static final String DEV_DEPENDENCY = "devDependencies";
@@ -118,16 +166,42 @@ public enum TypeScriptDependency implements SymbolDependencyContainer {
     public final SymbolDependency dependency;
 
     TypeScriptDependency(String type, String name, boolean unconditional) {
-        this(type, name, SdkVersion.getVersion(name), unconditional);
+        String version;
+        if (name.startsWith("@aws-sdk/")) {
+            version = SdkVersion.getVersion(name);
+        } else {
+            version = DependencyVersion.getVersion(name);
+        }
+
+        if (version == null) {
+            version = "latest";
+        }
+
+        // @smithy/server-* packages are pinned exactly rather than vended as caret ranges.
+        boolean isSmithyServerPackage = name.startsWith("@smithy/server-");
+        if ((name.startsWith("@smithy/") || name.startsWith("@aws-sdk/")) && !isSmithyServerPackage) {
+            if (!version.startsWith("^") && version.matches("^\\d+\\.\\d+\\.\\d+$")) {
+                version = "^" + version;
+            }
+        }
+
+        this.dependency = SymbolDependency.builder()
+            .dependencyType(type)
+            .packageName(name)
+            .version(version)
+            .putProperty("unconditional", unconditional)
+            .build();
+        this.packageName = name;
+        this.version = version;
     }
 
     TypeScriptDependency(String type, String name, String version, boolean unconditional) {
         this.dependency = SymbolDependency.builder()
-                .dependencyType(type)
-                .packageName(name)
-                .version(version)
-                .putProperty("unconditional", unconditional)
-                .build();
+            .dependencyType(type)
+            .packageName(name)
+            .version(version)
+            .putProperty("unconditional", unconditional)
+            .build();
         this.packageName = name;
         this.version = version;
     }
@@ -150,13 +224,30 @@ public enum TypeScriptDependency implements SymbolDependencyContainer {
         return resolved;
     }
 
-    private boolean isUnconditional() {
-        return dependency.expectProperty("unconditional", Boolean.class);
+    /**
+     * @return the smithy core version, used in @smithy/core versioning scheme.
+     */
+    public static String getSmithyCoreVersion() {
+        return DependencyVersion.VERSIONS.get("@smithy/core");
+    }
+
+    /**
+     * Note: if AWS SDK codegen is not loaded, then this will not work correctly.
+     *
+     * @return the leading AWS SDK client version, used in @aws-sdk/ckient versioning scheme.
+     */
+    public static String getAwsSdkLeadingClientVersion() {
+        return SdkVersion.getLeadingAwsSdkClientVersion();
     }
 
     @Override
     public List<SymbolDependency> getDependencies() {
         return Collections.singletonList(dependency);
+    }
+
+    @Override
+    public String getPackageName() {
+        return this.packageName;
     }
 
     /**
@@ -171,10 +262,14 @@ public enum TypeScriptDependency implements SymbolDependencyContainer {
      */
     public Symbol createSymbol(String name) {
         return Symbol.builder()
-                .namespace(dependency.getPackageName(), "/")
-                .name(name)
-                .addDependency(dependency)
-                .build();
+            .namespace(dependency.getPackageName(), "/")
+            .name(name)
+            .addDependency(dependency)
+            .build();
+    }
+
+    private boolean isUnconditional() {
+        return dependency.expectProperty("unconditional", Boolean.class);
     }
 
     /**
@@ -182,9 +277,10 @@ public enum TypeScriptDependency implements SymbolDependencyContainer {
      * on the classpath.
      */
     private static final class SdkVersion {
+
         private static final Logger LOGGER = Logger.getLogger(SdkVersion.class.getName());
         private static final String PROPERTIES_PATH =
-                "/software/amazon/smithy/aws/typescript/codegen/sdkVersions.properties";
+            "/software/amazon/smithy/aws/typescript/codegen/sdkVersions.properties";
         private static final Map<String, String> VERSIONS;
 
         static {
@@ -195,8 +291,11 @@ public enum TypeScriptDependency implements SymbolDependencyContainer {
                     throw new IOException();
                 }
                 Properties p = new Properties();
-                try (Reader r =
-                        new BufferedReader(new InputStreamReader(versionsUrl.openStream(), StandardCharsets.UTF_8))) {
+                try (
+                    Reader r = new BufferedReader(
+                        new InputStreamReader(versionsUrl.openStream(), StandardCharsets.UTF_8)
+                    )
+                ) {
                     p.load(r);
                 }
                 final Map<String, String> versions = new HashMap<>(p.size());
@@ -207,15 +306,85 @@ public enum TypeScriptDependency implements SymbolDependencyContainer {
                 });
                 tmpVersions = Collections.unmodifiableMap(versions);
             } catch (IOException e) {
-                LOGGER.info("Could not read AWS dependency versions from smithy-aws-typescript-codegen, "
-                        + "will use 'latest' for AWS dependencies");
+                LOGGER.fine(
+                    "Could not read AWS dependency versions from smithy-aws-typescript-codegen, " +
+                        "will use 'latest' for AWS dependencies"
+                );
+                tmpVersions = Collections.emptyMap();
+            }
+            VERSIONS = tmpVersions;
+        }
+
+        /**
+         * @return highest client version in the sdkVersions.properties file.
+         */
+        public static String getLeadingAwsSdkClientVersion() {
+            int major = 0;
+            int minor = 0;
+            int patch = 0;
+
+            for (Map.Entry<String, String> entry : VERSIONS.entrySet()) {
+                String packageName = entry.getKey();
+                String version = entry.getValue();
+
+                boolean isClient = packageName.startsWith("@aws-sdk/client-");
+                if (isClient) {
+                    boolean isSemverTrinumeric = version.matches("^\\d+\\.\\d+\\.\\d+$");
+                    if (isSemverTrinumeric) {
+                        String[] semver = version.split("\\.");
+                        major = Math.max(Integer.parseInt(semver[0]), major);
+                        minor = Math.max(Integer.parseInt(semver[1]), minor);
+                        patch = Math.max(Integer.parseInt(semver[2]), patch);
+                    }
+                }
+            }
+            return "%s.%s.%s".formatted(major, minor, patch);
+        }
+
+        private static String getVersion(String packageName) {
+            return VERSIONS.getOrDefault(packageName, "latest");
+        }
+    }
+
+    /**
+     * Reads the version of smithy-typescript published libraries.
+     */
+    private static final class DependencyVersion {
+
+        private static final Logger LOGGER = Logger.getLogger(DependencyVersion.class.getName());
+        private static final Map<String, String> VERSIONS;
+
+        static {
+            Map<String, String> tmpVersions;
+            try {
+                URL versionsUrl = DependencyVersion.class.getResource("dependencyVersions.properties");
+                if (versionsUrl == null) {
+                    throw new IOException();
+                }
+                Properties p = new Properties();
+                try (
+                    Reader r = new BufferedReader(
+                        new InputStreamReader(versionsUrl.openStream(), StandardCharsets.UTF_8)
+                    )
+                ) {
+                    p.load(r);
+                }
+                final Map<String, String> versions = new HashMap<>(p.size());
+                p.forEach((k, v) -> {
+                    if (versions.put(k.toString(), v.toString()) != null) {
+                        throw new IllegalArgumentException(String.format("Multiple versions defined for %s", k));
+                    }
+                });
+                tmpVersions = Collections.unmodifiableMap(versions);
+            } catch (IOException e) {
+                LOGGER.warning("Could not read dependency versions from smithy-typescript-codegen");
                 tmpVersions = Collections.emptyMap();
             }
             VERSIONS = tmpVersions;
         }
 
         private static String getVersion(String packageName) {
-            return VERSIONS.getOrDefault(packageName, "latest");
+            return VERSIONS.get(packageName);
         }
     }
 }

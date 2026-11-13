@@ -1,31 +1,56 @@
 /*
- * Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
- *
- * Licensed under the Apache License, Version 2.0 (the "License").
- * You may not use this file except in compliance with the License.
- * A copy of the License is located at
- *
- *  http://aws.amazon.com/apache2.0
- *
- * or in the "license" file accompanying this file. This file is distributed
- * on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either
- * express or implied. See the License for the specific language governing
- * permissions and limitations under the License.
+ * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
  */
-
 package software.amazon.smithy.typescript.codegen;
 
+import java.util.ServiceLoader;
+import java.util.ServiceLoader.Provider;
+import java.util.logging.Logger;
 import software.amazon.smithy.build.PluginContext;
 import software.amazon.smithy.build.SmithyBuildPlugin;
+import software.amazon.smithy.codegen.core.CodegenException;
 import software.amazon.smithy.codegen.core.directed.CodegenDirector;
 import software.amazon.smithy.typescript.codegen.integration.TypeScriptIntegration;
 import software.amazon.smithy.utils.SmithyInternalApi;
 
 /**
- * Plugin to trigger TypeScript code generation.
+ * Unified plugin for TypeScript code generation.
+ *
+ * <p>This is the central entry point that owns mode dispatch. The specialized
+ * {@link TypeScriptClientCodegenPlugin}, {@link TypeScriptServerCodegenPlugin},
+ * {@link TypeScriptSchemaSSDKCodegenPlugin}, and deprecated {@link TypeScriptSSDKCodegenPlugin}
+ * plugins retain their fixed modes and reject the {@code modes} setting.
+ *
+ * <p>The {@code modes} setting selects what is generated and how generation is driven:
+ * <ul>
+ *     <li><b>Service mode</b> ({@code ["client"]} or {@code ["server"]}) - generation is driven
+ *         by the {@code service}, which is required. Produces the client or server SDK for that
+ *         service and every shape in its closure.</li>
+ *     <li><b>Types mode</b> ({@code ["types"]}) - generation is driven by a {@code closure}
+ *         (a {@code shapeClosures} metadata entry referenced by id), with no {@code service}.
+ *         Produces only data shapes (structures, unions, enums, intEnums, lists, maps) and their
+ *         schemas.</li>
+ * </ul>
+ *
+ * <p>Configure via {@code smithy-build.json}:
+ * <pre>{@code
+ * {
+ *   "plugins": {
+ *     "typescript-codegen": {
+ *       "service": "com.example#MyService",
+ *       "package": "my-client",
+ *       "packageVersion": "0.0.1",
+ *       "modes": ["client"]
+ *     }
+ *   }
+ * }
+ * }</pre>
  */
 @SmithyInternalApi
-public final class TypeScriptCodegenPlugin implements SmithyBuildPlugin {
+public class TypeScriptCodegenPlugin implements SmithyBuildPlugin {
+
+    private static final Logger LOGGER = Logger.getLogger(TypeScriptCodegenPlugin.class.getName());
 
     @Override
     public String getName() {
@@ -34,33 +59,108 @@ public final class TypeScriptCodegenPlugin implements SmithyBuildPlugin {
 
     @Override
     public void execute(PluginContext context) {
-        CodegenDirector<TypeScriptWriter, TypeScriptIntegration, TypeScriptCodegenContext, TypeScriptSettings> runner
-                = new CodegenDirector<>();
+        execute(context, TypeScriptSettings.fromWithModes(context.getModel(), context.getSettings()));
+    }
 
-        runner.directedCodegen(new DirectedTypeScriptCodegen());
+    /**
+     * Runs codegen in a fixed mode for a specialized plugin.
+     *
+     * @param context the plugin context.
+     * @param artifactType the fixed artifact type to generate.
+     */
+    void execute(PluginContext context, TypeScriptSettings.ArtifactType artifactType) {
+        TypeScriptSettings settings = TypeScriptSettings.from(
+            context.getModel(),
+            context.getSettings(),
+            artifactType
+        );
+        execute(context, settings);
+    }
 
-        // Set the SmithyIntegration class to look for and apply using SPI.
-        runner.integrationClass(TypeScriptIntegration.class);
+    void execute(PluginContext context, TypeScriptSettings settings) {
+        if (settings.generateTypes() && !settings.isTypesOnly()) {
+            // TODO: Combined mode (types alongside client/server) requires generating schemas over
+            // the full connected-shape closure. Keep the mode set in settings so dispatch can be
+            // enabled without changing the configuration model once that behavior is supported.
+            throw new CodegenException(
+                "Combined mode (types alongside client/server) is not yet supported. "
+                    + "Use a single mode: [\"client\"], [\"server\"], or [\"types\"]."
+            );
+        }
 
-        // Set the FileManifest and Model from the plugin.
-        runner.fileManifest(context.getFileManifest());
-        runner.model(context.getModel());
+        if (settings.isTypesOnly()) {
+            executeTypesMode(context, settings);
+        } else {
+            executeServiceMode(context, settings);
+        }
+    }
 
-        // Create the TypeScriptSettings object from the plugin settings.
-        TypeScriptSettings settings = TypeScriptSettings.from(context.getModel(), context.getSettings(),
-                TypeScriptSettings.ArtifactType.CLIENT);
-        runner.settings(settings);
+    private void executeServiceMode(PluginContext context, TypeScriptSettings settings) {
+        CodegenDirector<TypeScriptWriter, TypeScriptIntegration, TypeScriptCodegenContext, TypeScriptSettings> runner =
+            newRunner(context, settings);
 
         runner.service(settings.getService());
-
-        // Configure the director to perform some common model transforms.
         runner.performDefaultCodegenTransforms();
 
-        // TODO: Not using below because it would break existing AWS SDKs. Maybe it should be configurable
-        // so generic SDKs call this by default, but AWS SDKs can opt-out of it via a setting.
-        // runner.createDedicatedInputsAndOutputs();
+        // TODO: Not using createDedicatedInputsAndOutputs because it would break existing AWS SDKs.
+        // Maybe it should be configurable so generic SDKs call this by default, but AWS SDKs can
+        // opt-out of it via a setting.
 
-        // Run it!
         runner.run();
+    }
+
+    private void executeTypesMode(PluginContext context, TypeScriptSettings settings) {
+        String closureId = settings.getClosure();
+        if (closureId == null || closureId.isEmpty()) {
+            throw new CodegenException(
+                "The 'closure' setting is required when using types-only mode (modes: [\"types\"])."
+            );
+        }
+
+        CodegenDirector<TypeScriptWriter, TypeScriptIntegration, TypeScriptCodegenContext, TypeScriptSettings> runner =
+            newRunner(context, settings);
+
+        runner.shapeClosure(closureId);
+        runner.generateDataShapesOnly();
+        // Without a service to disambiguate them, two shapes that share a (case-insensitive) name
+        // across namespaces would generate colliding TypeScript types. Fail fast so the closure
+        // author resolves the conflict with a rename rather than emitting uncompilable output.
+        runner.requireCaseInsensitiveNames();
+        runner.performDefaultCodegenTransforms();
+        runner.run();
+    }
+
+    private CodegenDirector<TypeScriptWriter, TypeScriptIntegration, TypeScriptCodegenContext,
+        TypeScriptSettings> newRunner(PluginContext context, TypeScriptSettings settings) {
+        CodegenDirector<TypeScriptWriter, TypeScriptIntegration, TypeScriptCodegenContext, TypeScriptSettings> runner =
+            new CodegenDirector<>();
+
+        runner.directedCodegen(new DirectedTypeScriptCodegen());
+        runner.integrationClass(TypeScriptIntegration.class);
+        runner.fileManifest(context.getFileManifest());
+        runner.model(context.getModel());
+        runner.settings(settings);
+
+        // Only add integrations if the integrations match the settings.
+        // This uses {@link TypeScriptIntegration#matchesSettings}, which is a
+        // Smithy internal API. This may be removed at any point.
+        runner.integrationFinder(
+            () -> () -> ServiceLoader.load(TypeScriptIntegration.class, CodegenDirector.class.getClassLoader())
+                .stream()
+                .map(Provider::get)
+                .filter(integration -> {
+                    boolean matchesSettings = integration.matchesSettings(settings);
+                    if (!matchesSettings) {
+                        LOGGER.fine(
+                            () -> "Skipping TypeScript integration based on settings: "
+                                + integration.name()
+                        );
+                    }
+                    return matchesSettings;
+                })
+                .iterator()
+        );
+
+        return runner;
     }
 }

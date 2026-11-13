@@ -1,18 +1,7 @@
 /*
- * Copyright 2022 Amazon.com, Inc. or its affiliates. All Rights Reserved.
- *
- * Licensed under the Apache License, Version 2.0 (the "License").
- * You may not use this file except in compliance with the License.
- * A copy of the License is located at
- *
- *  http://aws.amazon.com/apache2.0
- *
- * or in the "license" file accompanying this file. This file is distributed
- * on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either
- * express or implied. See the License for the specific language governing
- * permissions and limitations under the License.
+ * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
  */
-
 package software.amazon.smithy.typescript.codegen.integration;
 
 import java.nio.file.Paths;
@@ -22,9 +11,9 @@ import software.amazon.smithy.codegen.core.Symbol;
 import software.amazon.smithy.codegen.core.SymbolProvider;
 import software.amazon.smithy.codegen.core.SymbolReference;
 import software.amazon.smithy.model.Model;
-import software.amazon.smithy.model.shapes.ServiceShape;
 import software.amazon.smithy.model.traits.ErrorTrait;
 import software.amazon.smithy.typescript.codegen.CodegenUtils;
+import software.amazon.smithy.typescript.codegen.SmithyCoreSubmodules;
 import software.amazon.smithy.typescript.codegen.TypeScriptCodegenContext;
 import software.amazon.smithy.typescript.codegen.TypeScriptDependency;
 import software.amazon.smithy.typescript.codegen.TypeScriptSettings;
@@ -52,45 +41,73 @@ public final class AddBaseServiceExceptionClass implements TypeScriptIntegration
     }
 
     private void writeAdditionalFiles(
-            TypeScriptSettings settings,
-            Model model,
-            SymbolProvider symbolProvider,
-            BiConsumer<String, Consumer<TypeScriptWriter>> writerFactory
+        TypeScriptSettings settings,
+        Model model,
+        SymbolProvider symbolProvider,
+        BiConsumer<String, Consumer<TypeScriptWriter>> writerFactory
     ) {
         boolean isClientSdk = settings.generateClient();
-        if (isClientSdk) {
-            String serviceName = getServiceName(settings, model, symbolProvider);
-            String serviceExceptionName = getServiceExceptionName(serviceName);
+        boolean isSchemaServer = settings.generateServerSdk()
+            && (settings.generateServerSchemas()
+                || (settings.getProtocol() != null && settings.generateSchemas()));
+        if (isClientSdk || isSchemaServer) {
+            String serviceName = CodegenUtils.getServiceName(settings, model, symbolProvider);
+            String serviceExceptionName = CodegenUtils.getSyntheticBaseExceptionName(serviceName, model);
+            String serviceNamespace = settings.getService(model).getId().getNamespace();
             writerFactory.accept(
-                    Paths.get(CodegenUtils.SOURCE_FOLDER, "models", serviceExceptionName + ".ts").toString(),
-                    writer -> {
-                            writer.addImport("ServiceException", "__ServiceException",
-                                    TypeScriptDependency.AWS_SMITHY_CLIENT.packageName);
-                            writer.addImport("ServiceExceptionOptions", "__ServiceExceptionOptions",
-                                    TypeScriptDependency.AWS_SMITHY_CLIENT.packageName);
-                            writer.writeDocs("Base exception class for all service exceptions from "
-                                    + serviceName + " service.");
-                            writer.openBlock("export class $L extends __ServiceException {", serviceExceptionName);
-                            writer.writeDocs("@internal");
-                            writer.openBlock("constructor(options: __ServiceExceptionOptions) {");
-                            writer.write("super(options);");
-                            writer.write("Object.setPrototypeOf(this, $L.prototype);", serviceExceptionName);
-                            writer.closeBlock("}"); // constructor
-                            writer.closeBlock("}"); // class
-                    });
+                Paths.get(CodegenUtils.SOURCE_FOLDER, "models", serviceExceptionName + ".ts").toString(),
+                writer -> {
+                    writer.addImportSubmodule(
+                        "ServiceException",
+                        "__ServiceException",
+                        TypeScriptDependency.SMITHY_CORE,
+                        SmithyCoreSubmodules.CLIENT
+                    );
+                    writer.addTypeImportSubmodule(
+                        "ServiceExceptionOptions",
+                        "__ServiceExceptionOptions",
+                        TypeScriptDependency.SMITHY_CORE,
+                        SmithyCoreSubmodules.CLIENT
+                    );
+                    // Export ServiceException information to allow
+                    //      documentation inheritance to consume their types
+                    writer.write("export type { __ServiceExceptionOptions };\n");
+                    writer.write("export { __ServiceException };\n");
+                    writer.writeDocs(
+                        "@public\n\nBase exception class for all service exceptions from " + serviceName
+                            + " service."
+                    );
+                    writer.openBlock("export class $L extends __ServiceException {", serviceExceptionName);
+                    // Codegen-emitted so the id is present before TypeRegistry
+                    // registration runs; registration backfills the same value.
+                    writer.write(
+                        "public static readonly shapeId: string = $S;",
+                        "smithy.ts.sdk.synthetic." + serviceNamespace + "#" + serviceExceptionName
+                    );
+                    writer.writeDocs("@internal");
+                    writer.openBlock("constructor(options: __ServiceExceptionOptions) {");
+                    writer.write("super(options);");
+                    writer.write("Object.setPrototypeOf(this, $L.prototype);", serviceExceptionName);
+                    writer.closeBlock("}"); // constructor
+                    writer.closeBlock("}"); // class
+                }
+            );
         }
     }
 
     private void writeAdditionalExports(
-            TypeScriptSettings settings,
-            Model model,
-            SymbolProvider symbolProvider,
-            TypeScriptWriter writer
+        TypeScriptSettings settings,
+        Model model,
+        SymbolProvider symbolProvider,
+        TypeScriptWriter writer
     ) {
         boolean isClientSdk = settings.generateClient();
-        if (isClientSdk) {
-            String serviceName = getServiceName(settings, model, symbolProvider);
-            String serviceExceptionName = getServiceExceptionName(serviceName);
+        boolean isSchemaServer = settings.generateServerSdk()
+            && (settings.generateServerSchemas()
+                || (settings.getProtocol() != null && settings.generateSchemas()));
+        if (isClientSdk || isSchemaServer) {
+            String serviceName = CodegenUtils.getServiceName(settings, model, symbolProvider);
+            String serviceExceptionName = CodegenUtils.getSyntheticBaseExceptionName(serviceName, model);
             writer.write("export { $1L } from \"./models/$1L\";", serviceExceptionName);
         }
     }
@@ -99,55 +116,49 @@ public final class AddBaseServiceExceptionClass implements TypeScriptIntegration
      * For any error shape, add the reference of the base error class to the
      * error symbol's references. In client SDK, the base error class is the
      * service-specific service exception class. In server SDK, the base error
-     * class is the ServiceException class from server-common package.
+     * class is the ServiceException class from server-common package. In
+     * types-only mode there is no service, so error shapes extend the generic
+     * {@code ServiceException} base from {@code @smithy/core}.
      */
     @Override
     public SymbolProvider decorateSymbolProvider(
-            Model model,
-            TypeScriptSettings settings,
-            SymbolProvider symbolProvider
+        Model model,
+        TypeScriptSettings settings,
+        SymbolProvider symbolProvider
     ) {
         return shape -> {
             Symbol symbol = symbolProvider.toSymbol(shape);
-            if (shape.hasTrait(ErrorTrait.class)) {
-                String serviceName = getServiceName(settings, model, symbolProvider);
-                String baseExceptionAlias = "__BaseException";
-                SymbolReference reference;
-                if (settings.generateClient()) {
-                    String serviceExceptionName = getServiceExceptionName(serviceName);
-                    String namespace = Paths.get(".", "src", "models", serviceExceptionName).toString();
-                    Symbol serviceExceptionSymbol = Symbol.builder()
-                            .name(serviceExceptionName)
-                            .namespace(namespace, "/")
-                            .definitionFile(namespace + ".ts").build();
-                    reference = SymbolReference.builder()
-                            .options(SymbolReference.ContextOption.USE)
-                            .alias(baseExceptionAlias)
-                            .symbol(serviceExceptionSymbol)
-                            .build();
-                } else {
-                    reference = SymbolReference.builder()
-                            .options(SymbolReference.ContextOption.USE)
-                            .alias(baseExceptionAlias)
-                            .symbol(TypeScriptDependency.SERVER_COMMON.createSymbol("ServiceException"))
-                            .build();
-                }
-                return symbol.toBuilder().addReference(reference).build();
+            if (!shape.hasTrait(ErrorTrait.class)) {
+                return symbol;
             }
-            return symbol;
+            String baseExceptionAlias = "__BaseException";
+            Symbol baseExceptionSymbol;
+            if (settings.getOptionalService().isEmpty()) {
+                // Types-only mode: no service-specific base exists, so reference the generic
+                // ServiceException from the @smithy/core client submodule.
+                baseExceptionSymbol = Symbol.builder()
+                    .name("ServiceException")
+                    .namespace(TypeScriptDependency.SMITHY_CORE.getPackageName() + SmithyCoreSubmodules.CLIENT, "/")
+                    .addDependency(TypeScriptDependency.SMITHY_CORE)
+                    .build();
+            } else if (settings.generateClient()) {
+                String serviceName = CodegenUtils.getServiceName(settings, model, symbolProvider);
+                String serviceExceptionName = CodegenUtils.getSyntheticBaseExceptionName(serviceName, model);
+                String namespace = Paths.get(".", "src", "models", serviceExceptionName).toString();
+                baseExceptionSymbol = Symbol.builder()
+                    .name(serviceExceptionName)
+                    .namespace(namespace, "/")
+                    .definitionFile(namespace + ".ts")
+                    .build();
+            } else {
+                baseExceptionSymbol = TypeScriptDependency.SERVER_COMMON.createSymbol("ServiceException");
+            }
+            SymbolReference reference = SymbolReference.builder()
+                .options(SymbolReference.ContextOption.USE)
+                .alias(baseExceptionAlias)
+                .symbol(baseExceptionSymbol)
+                .build();
+            return symbol.toBuilder().addReference(reference).build();
         };
-    }
-
-    private String getServiceName(
-        TypeScriptSettings settings,
-        Model model,
-        SymbolProvider symbolProvider
-    ) {
-        ServiceShape service = settings.getService(model);
-        return symbolProvider.toSymbol(service).getName().replaceAll("(Client)$", "");
-    }
-
-    private String getServiceExceptionName(String serviceName) {
-        return serviceName + "ServiceException";
     }
 }

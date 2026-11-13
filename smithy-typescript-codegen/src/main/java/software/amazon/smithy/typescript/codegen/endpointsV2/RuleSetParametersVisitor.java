@@ -1,45 +1,40 @@
 /*
- * Copyright 2022 Amazon.com, Inc. or its affiliates. All Rights Reserved.
- *
- * Licensed under the Apache License, Version 2.0 (the "License").
- * You may not use this file except in compliance with the License.
- * A copy of the License is located at
- *
- *  http://aws.amazon.com/apache2.0
- *
- * or in the "license" file accompanying this file. This file is distributed
- * on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either
- * express or implied. See the License for the specific language governing
- * permissions and limitations under the License.
+ * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
  */
-
 package software.amazon.smithy.typescript.codegen.endpointsV2;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
 import software.amazon.smithy.model.node.Node;
 import software.amazon.smithy.model.node.NodeVisitor;
 import software.amazon.smithy.model.node.ObjectNode;
 import software.amazon.smithy.model.node.StringNode;
+import software.amazon.smithy.typescript.codegen.TypeScriptDependency;
 import software.amazon.smithy.typescript.codegen.TypeScriptWriter;
 
 /**
  * Writes endpoint ruleset params into a client-specific config resolver step, applying defaults as needed.
  */
 public class RuleSetParametersVisitor extends NodeVisitor.Default<Void> {
+
     private final TypeScriptWriter writer;
     private final Map<String, String> clientContextParams;
     private boolean useLocalNames = false;
     private boolean writeDefaults = false;
+    private Set<String> clientLevelParams = null;
 
     public RuleSetParametersVisitor(TypeScriptWriter writer) {
         this.writer = writer;
         this.clientContextParams = new HashMap<>();
     }
 
-    public RuleSetParametersVisitor(TypeScriptWriter writer,
-                                    Map<String, String> clientContextParams,
-                                    boolean useLocalNames) {
+    public RuleSetParametersVisitor(
+        TypeScriptWriter writer,
+        Map<String, String> clientContextParams,
+        boolean useLocalNames
+    ) {
         this.writer = writer;
         this.clientContextParams = clientContextParams;
         this.useLocalNames = useLocalNames;
@@ -49,6 +44,16 @@ public class RuleSetParametersVisitor extends NodeVisitor.Default<Void> {
         this(writer);
         this.writeDefaults = writeDefaults;
         this.useLocalNames = true;
+    }
+
+    /**
+     * @param clientLevelParams - the set of parameter names that are valid at the client level
+     *                            (built-ins and client context params). When writing defaults,
+     *                            only parameters in this set will have defaults emitted.
+     */
+    public RuleSetParametersVisitor(TypeScriptWriter writer, boolean writeDefaults, Set<String> clientLevelParams) {
+        this(writer, writeDefaults);
+        this.clientLevelParams = clientLevelParams;
     }
 
     @Override
@@ -62,11 +67,25 @@ public class RuleSetParametersVisitor extends NodeVisitor.Default<Void> {
                 localKey = EndpointsParamNameMap.getLocalName(key);
             }
 
-            ParameterGenerator parameterGenerator = new ParameterGenerator(localKey, param);
+            ParameterGenerator parameterGenerator = new ParameterGenerator(localKey, param, useLocalNames);
+
+            if (localKey.equals("endpoint")) {
+                writer.addTypeImport("Endpoint", null, TypeScriptDependency.SMITHY_TYPES);
+                writer.addTypeImport("EndpointV2", null, TypeScriptDependency.SMITHY_TYPES);
+                writer.addTypeImport("Provider", null, TypeScriptDependency.SMITHY_TYPES);
+            }
 
             if (writeDefaults) {
                 if (parameterGenerator.hasDefault()) {
-                    writer.write(parameterGenerator.defaultAsCodeString());
+                    // Don't write root-level defaults for conflicting parameters
+                    // Don't write defaults for params not available at the client level
+                    // (e.g. static context params that are only set per-command)
+                    if (
+                        !ClientConfigKeys.isKnownConfigKey(key)
+                            && (clientLevelParams == null || clientLevelParams.contains(key))
+                    ) {
+                        writer.write(parameterGenerator.defaultAsCodeString());
+                    }
                 }
             } else if (clientContextParams.isEmpty() || clientContextParams.containsKey(key)) {
                 boolean isClientContextParams = !clientContextParams.isEmpty();

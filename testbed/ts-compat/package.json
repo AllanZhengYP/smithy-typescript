@@ -1,0 +1,9 @@
+{
+  "name": "@smithy/ts-compat-test",
+  "private": true,
+  "description": "Verifies that generated clients compile against every supported TypeScript minor version.",
+  "type": "module",
+  "scripts": {
+    "test": "node ./run.mjs"
+  }
+}

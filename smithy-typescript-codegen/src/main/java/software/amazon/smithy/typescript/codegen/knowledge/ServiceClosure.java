@@ -1,0 +1,415 @@
+/*
+ * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+package software.amazon.smithy.typescript.codegen.knowledge;
+
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.Objects;
+import java.util.Set;
+import java.util.TreeSet;
+import software.amazon.smithy.codegen.core.ReservedWords;
+import software.amazon.smithy.codegen.core.ReservedWordsBuilder;
+import software.amazon.smithy.model.Model;
+import software.amazon.smithy.model.knowledge.KnowledgeIndex;
+import software.amazon.smithy.model.knowledge.TopDownIndex;
+import software.amazon.smithy.model.shapes.CollectionShape;
+import software.amazon.smithy.model.shapes.ListShape;
+import software.amazon.smithy.model.shapes.MapShape;
+import software.amazon.smithy.model.shapes.MemberShape;
+import software.amazon.smithy.model.shapes.OperationShape;
+import software.amazon.smithy.model.shapes.ServiceShape;
+import software.amazon.smithy.model.shapes.Shape;
+import software.amazon.smithy.model.shapes.ShapeId;
+import software.amazon.smithy.model.shapes.StructureShape;
+import software.amazon.smithy.model.shapes.UnionShape;
+import software.amazon.smithy.model.traits.EnumTrait;
+import software.amazon.smithy.model.traits.ErrorTrait;
+import software.amazon.smithy.model.traits.IdempotencyTokenTrait;
+import software.amazon.smithy.model.traits.PaginatedTrait;
+import software.amazon.smithy.typescript.codegen.TypeScriptClientCodegenPlugin;
+import software.amazon.smithy.typescript.codegen.schema.SchemaReferenceIndex;
+import software.amazon.smithy.typescript.codegen.util.StringStore;
+import software.amazon.smithy.utils.SmithyInternalApi;
+import software.amazon.smithy.waiters.WaitableTrait;
+
+/**
+ * Retrieves shapes in the service operation closure.
+ */
+@SmithyInternalApi
+public final class ServiceClosure implements KnowledgeIndex {
+
+    public static final ReservedWords RESERVED_WORDS = new ReservedWordsBuilder()
+        .loadWords(Objects.requireNonNull(TypeScriptClientCodegenPlugin.class.getResource("reserved-words.txt")))
+        .build();
+    private static final ShapeId UNIT = ShapeId.from("smithy.api#Unit");
+    private final Model model;
+    private final ServiceShape service;
+
+    private final SchemaReferenceIndex elision;
+
+    /**
+     * For API testing & schemas.
+     */
+    private final TreeSet<OperationShape> operations = new TreeSet<>();
+    private final TreeSet<OperationShape> paginatedOperations = new TreeSet<>();
+    private final TreeSet<OperationShape> waitableOperations = new TreeSet<>();
+
+    /**
+     * Note: also contains unions.
+     * For API testing.
+     */
+    private final TreeSet<Shape> structuralInterfaces = new TreeSet<>();
+    /**
+     * For API testing.
+     */
+    private final TreeSet<Shape> errors = new TreeSet<>();
+    /**
+     * For API testing.
+     */
+    private final TreeSet<Shape> enums = new TreeSet<>();
+
+    /**
+     * For schemas.
+     */
+    private final TreeSet<StructureShape> structureShapes = new TreeSet<>();
+    /**
+     * For schemas.
+     */
+    private final TreeSet<CollectionShape> collectionShapes = new TreeSet<>();
+    /**
+     * For schemas.
+     */
+    private final TreeSet<MapShape> mapShapes = new TreeSet<>();
+    /**
+     * For schemas.
+     */
+    private final TreeSet<UnionShape> unionShapes = new TreeSet<>();
+    /**
+     * For schemas.
+     */
+    private final TreeSet<Shape> simpleShapes = new TreeSet<>();
+    /**
+     * Used to deconflict schema variable names.
+     * Iteration determinism is desired (ordered set).
+     */
+    private final TreeSet<Shape> existsAsSchema = new TreeSet<>();
+    /**
+     * For schemas.
+     */
+    private final Set<Shape> requiresNamingDeconfliction = new HashSet<>();
+
+    /**
+     * Used temporarily during initial traversal.
+     */
+    private final Set<ShapeId> scanned = new HashSet<>();
+
+    private ServiceClosure(Model model, ServiceShape service) {
+        this.model = model;
+        this.service = service;
+        elision = SchemaReferenceIndex.of(model);
+        TopDownIndex topDown = TopDownIndex.of(model);
+        Set<OperationShape> containedOperations = topDown.getContainedOperations(service);
+        operations.addAll(containedOperations);
+        scan(containedOperations);
+        scan(service);
+        scanned.clear();
+        deconflictSchemaVarNames();
+    }
+
+    private ServiceClosure(Model model, Collection<Shape> shapes) {
+        this.model = model;
+        this.service = null;
+        elision = SchemaReferenceIndex.of(model);
+        scan(shapes);
+        scanned.clear();
+        deconflictSchemaVarNames();
+    }
+
+    public static ServiceClosure of(Model model, ServiceShape service) {
+        return model.getKnowledge(ServiceClosure.class, (Model m) -> new ServiceClosure(m, service));
+    }
+
+    public static ServiceClosure ofShapes(Model model, Collection<Shape> shapes) {
+        return new ServiceClosure(model, shapes);
+    }
+
+    public TreeSet<Shape> getStructuralNonErrorShapes() {
+        return structuralInterfaces;
+    }
+
+    public TreeSet<Shape> getErrorShapes() {
+        return errors;
+    }
+
+    public TreeSet<Shape> getEnums() {
+        return enums;
+    }
+
+    public TreeSet<String> getWaiterNames() {
+        TreeSet<String> waiters = new TreeSet<>();
+        for (OperationShape operation : getWaitableOperationShapes()) {
+            operation
+                .getTrait(WaitableTrait.class)
+                .ifPresent(trait -> {
+                    trait
+                        .getWaiters()
+                        .forEach((waiterName, waiter) -> {
+                            waiters.add("waitFor" + waiterName);
+                            waiters.add("waitUntil" + waiterName);
+                        });
+                });
+        }
+        return waiters;
+    }
+
+    public TreeSet<String> getPaginatorNames() {
+        TreeSet<String> paginators = new TreeSet<>();
+        for (OperationShape operation : getPaginatedOperationShapes()) {
+            operation
+                .getTrait(PaginatedTrait.class)
+                .ifPresent(trait -> {
+                    paginators.add("paginate" + operation.getId().getName());
+                });
+        }
+        return paginators;
+    }
+
+    public Set<Shape> getRequiresNamingDeconfliction() {
+        return requiresNamingDeconfliction;
+    }
+
+    public TreeSet<Shape> getSimpleShapes() {
+        return simpleShapes;
+    }
+
+    public TreeSet<StructureShape> getStructureShapes() {
+        return structureShapes;
+    }
+
+    public TreeSet<UnionShape> getUnionShapes() {
+        return unionShapes;
+    }
+
+    public TreeSet<MapShape> getMapShapes() {
+        return mapShapes;
+    }
+
+    public TreeSet<CollectionShape> getCollectionShapes() {
+        return collectionShapes;
+    }
+
+    public TreeSet<OperationShape> getOperationShapes() {
+        return operations;
+    }
+
+    public TreeSet<OperationShape> getPaginatedOperationShapes() {
+        return paginatedOperations;
+    }
+
+    public TreeSet<OperationShape> getWaitableOperationShapes() {
+        return waitableOperations;
+    }
+
+    /**
+     * @return variable name of the shape's schema, with deconfliction for multiple namespaces with the same
+     * unqualified name.
+     */
+    public String getShapeSchemaVariableName(Shape shape, StringStore store) {
+        if (shape.getId().equals(ShapeId.from("smithy.api#Unit"))) {
+            return "__Unit";
+        }
+        String symbolName = RESERVED_WORDS.escape(shape.getId().getName());
+        if (getRequiresNamingDeconfliction().contains(shape)) {
+            if (null == store) {
+                throw new RuntimeException(
+                    "getShapeSchemaVariableName must be called with a StringStore because the shape " +
+                        shape.getId().getName() +
+                        "requires naming deconfliction."
+                );
+            }
+            symbolName += "_" + store.var(shape.getId().getNamespace(), "n");
+        }
+        /*
+         * Although exporting a type and value with the same name is allowed by TS, we
+         * do not want to do this because the structure's interface is not that
+         * of the schema object.
+         *
+         * The name transform deconflicts the interface and structure variable names.
+         * for export at the top level of the same package.
+         */
+        String suffix = "";
+        if (shape.isStructureShape() || shape.isUnionShape() || shape.isOperationShape()) {
+            suffix = "$";
+        }
+        return symbolName + suffix;
+    }
+
+    /**
+     * This is the existing definition migrated from StructuredMemberWriter, which
+     * writes e.g. `member?: Type | undefined` vs. `member: Type | undefined`, the canonical
+     * client-side modeled optionality.
+     * This differs from the structure member optionality specification in
+     * <a href="https://smithy.io/2.0/spec/aggregate-types.html#structure-member-optionality">spec point 3.3.3</a>
+     */
+    public static boolean isMemberRequiredInClient(MemberShape member) {
+        // Currently the client only generates a default for idempotency tokens.
+        // No default is generated for values with a default value trait.
+        boolean clientGeneratesValue = member.hasTrait(IdempotencyTokenTrait.class);
+        return member.isRequired() && !clientGeneratesValue;
+    }
+
+    /**
+     * Since we use the short names for schema objects, in rare cases there may be a
+     * naming conflict due to shapes with the same short name in different namespaces.
+     * These shapes will have their variable names deconflicted with a suffix.
+     */
+    private void deconflictSchemaVarNames() {
+        Set<String> observedShapeNames = new HashSet<>();
+        for (Shape shape : existsAsSchema) {
+            if (observedShapeNames.contains(shape.getId().getName())) {
+                requiresNamingDeconfliction.add(shape);
+            } else {
+                observedShapeNames.add(shape.getId().getName());
+            }
+        }
+    }
+
+    private void scan(Shape shape) {
+        scan(Collections.singletonList(shape));
+    }
+
+    private void scan(Set<OperationShape> shapes) {
+        scan(new ArrayList<>(shapes));
+    }
+
+    private void scan(Collection<Shape> shapes) {
+        for (Shape shape : shapes) {
+            if (scanned.contains(shape.getId())) {
+                continue;
+            }
+            scanned.add(shape.getId());
+
+            if (shape.isMemberShape()) {
+                MemberShape memberShape = (MemberShape) shape;
+                shape = model.expectShape(memberShape.getTarget());
+            }
+
+            switch (shape.getType()) {
+                case LIST -> {
+                    ListShape listShape = (ListShape) shape;
+                    collectionShapes.add(listShape);
+                    existsAsSchema.add(listShape);
+                    scan(listShape.getMember());
+                }
+                case SET -> {
+                    var setShape = shape.asSetShape().get();
+                    collectionShapes.add(setShape);
+                    existsAsSchema.add(setShape);
+                    scan(setShape.getMember());
+                }
+                case MAP -> {
+                    MapShape mapShape = (MapShape) shape;
+                    mapShapes.add(mapShape);
+                    existsAsSchema.add(mapShape);
+                    scan(mapShape.getKey());
+                    scan(mapShape.getValue());
+                }
+                case STRUCTURE, UNION -> {
+                    if (shape.isStructureShape()) {
+                        structureShapes.add(shape.asStructureShape().get());
+                    } else if (shape.isUnionShape()) {
+                        unionShapes.add(shape.asUnionShape().get());
+                    }
+                    existsAsSchema.add(shape);
+
+                    if (shape.hasTrait(ErrorTrait.class)) {
+                        errors.add(shape);
+                    } else if (!shape.getId().equals(UNIT)) {
+                        structuralInterfaces.add(shape);
+                    }
+
+                    if (shape instanceof StructureShape structureShape) {
+                        structureShape.getAllMembers().values().forEach(this::scan);
+                    } else if (shape instanceof UnionShape unionShape) {
+                        unionShape.getAllMembers().values().forEach(this::scan);
+                    }
+                }
+                case OPERATION -> {
+                    OperationShape operation = (OperationShape) shape;
+                    if (operation.hasTrait(WaitableTrait.ID)) {
+                        waitableOperations.add(operation);
+                    }
+                    if (operation.hasTrait(PaginatedTrait.ID)) {
+                        paginatedOperations.add(operation);
+                    }
+                    if (operation.getInput().isPresent()) {
+                        scan(model.expectShape(operation.getInputShape()));
+                    } else {
+                        scan(model.expectShape(UNIT));
+                    }
+                    if (operation.getOutput().isPresent()) {
+                        scan(model.expectShape(operation.getOutputShape()));
+                    } else {
+                        scan(model.expectShape(UNIT));
+                    }
+                    if (service != null) {
+                        operation
+                            .getErrors(service)
+                            .forEach(error -> {
+                                scan(model.expectShape(error));
+                            });
+                    } else {
+                        operation
+                            .getErrors()
+                            .forEach(error -> {
+                                scan(model.expectShape(error));
+                            });
+                    }
+                    operations.add(operation);
+                    existsAsSchema.add(operation);
+                }
+                case SERVICE -> {
+                    ServiceShape serviceShape = (ServiceShape) shape;
+                    serviceShape
+                        .getErrorsSet()
+                        .forEach(errorShapeId -> {
+                            Shape errorShape = model.expectShape(errorShapeId);
+                            scan(errorShape);
+                        });
+                }
+                case
+                    BYTE,
+                    INT_ENUM,
+                    SHORT,
+                    INTEGER,
+                    LONG,
+                    FLOAT,
+                    DOUBLE,
+                    BIG_INTEGER,
+                    BIG_DECIMAL,
+                    BOOLEAN,
+                    STRING,
+                    TIMESTAMP,
+                    DOCUMENT,
+                    ENUM,
+                    BLOB -> {
+                    if (shape.isEnumShape() || shape.isIntEnumShape() || shape.hasTrait(EnumTrait.class)) {
+                        enums.add(shape);
+                    }
+
+                    if (elision.traits.hasSchemaTraits(shape)) {
+                        existsAsSchema.add(shape);
+                    }
+                    simpleShapes.add(shape);
+                }
+                default -> {
+                    // ...
+                }
+            }
+        }
+    }
+}

@@ -1,30 +1,25 @@
 /*
- * Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
- *
- * Licensed under the Apache License, Version 2.0 (the "License").
- * You may not use this file except in compliance with the License.
- * A copy of the License is located at
- *
- *  http://aws.amazon.com/apache2.0
- *
- * or in the "license" file accompanying this file. This file is distributed
- * on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either
- * express or implied. See the License for the specific language governing
- * permissions and limitations under the License.
+ * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
  */
-
 package software.amazon.smithy.typescript.codegen;
 
+import java.nio.file.Paths;
 import java.util.Set;
 import java.util.TreeSet;
 import software.amazon.smithy.codegen.core.Symbol;
 import software.amazon.smithy.codegen.core.SymbolProvider;
 import software.amazon.smithy.model.Model;
 import software.amazon.smithy.model.knowledge.TopDownIndex;
+import software.amazon.smithy.model.shapes.MemberShape;
 import software.amazon.smithy.model.shapes.OperationShape;
 import software.amazon.smithy.model.shapes.ServiceShape;
+import software.amazon.smithy.model.traits.PaginatedTrait;
+import software.amazon.smithy.typescript.codegen.knowledge.ServiceClosure;
 import software.amazon.smithy.utils.SmithyInternalApi;
 import software.amazon.smithy.utils.StringUtils;
+import software.amazon.smithy.waiters.WaitableTrait;
+import software.amazon.smithy.waiters.Waiter;
 
 /**
  * Generates aggregated client for service.
@@ -45,14 +40,15 @@ final class ServiceAggregatedClientGenerator implements Runnable {
     private final String aggregateClientName;
     private final Symbol serviceSymbol;
     private final ApplicationProtocol applicationProtocol;
+    private final ServiceClosure closure;
 
     ServiceAggregatedClientGenerator(
-            TypeScriptSettings settings,
-            Model model,
-            SymbolProvider symbolProvider,
-            String aggregateClientName,
-            TypeScriptWriter writer,
-            ApplicationProtocol applicationProtocol
+        TypeScriptSettings settings,
+        Model model,
+        SymbolProvider symbolProvider,
+        String aggregateClientName,
+        TypeScriptWriter writer,
+        ApplicationProtocol applicationProtocol
     ) {
         this.settings = settings;
         this.model = model;
@@ -61,65 +57,280 @@ final class ServiceAggregatedClientGenerator implements Runnable {
         this.writer = writer;
         this.aggregateClientName = aggregateClientName;
         this.applicationProtocol = applicationProtocol;
-        serviceSymbol = symbolProvider.toSymbol(service);
+        serviceSymbol = symbolProvider.toSymbol(service).toBuilder().putProperty("typeOnly", false).build();
+        closure = ServiceClosure.of(model, settings.getService(model));
     }
 
     @Override
     public void run() {
         TopDownIndex topDownIndex = TopDownIndex.of(model);
+        final Set<OperationShape> containedOperations = new TreeSet<>(topDownIndex.getContainedOperations(service));
 
-        // Generate the client and extend from the bare-bones client.
-        writer.writeShapeDocs(service);
-        writer.openBlock("export class $L extends $T {", "}", aggregateClientName, serviceSymbol, () -> {
-            Set<OperationShape> containedOperations = new TreeSet<>(topDownIndex.getContainedOperations(service));
+        boolean hasPaginators = !closure.getPaginatedOperationShapes().isEmpty();
+        boolean hasWaiters = !closure.getWaitableOperationShapes().isEmpty();
+
+        writer.openBlock("const commands = {");
+        for (OperationShape operation : containedOperations) {
+            Symbol operationSymbol = symbolProvider
+                .toSymbol(operation)
+                .toBuilder()
+                .putProperty("typeOnly", false)
+                .build();
+            writer.write("$T,", operationSymbol);
+            if (operation.hasTrait(PaginatedTrait.ID)) {
+                hasPaginators = true;
+            }
+            if (operation.hasTrait(WaitableTrait.ID)) {
+                hasWaiters = true;
+            }
+        }
+        writer.closeBlock("};");
+
+        if (hasPaginators) {
+            writer.openBlock("const paginators = {");
+            for (OperationShape operation : closure.getPaginatedOperationShapes()) {
+                String paginatorFnName = "paginate" + operation.getId().getName();
+                String paginatorLocalName = "paginate" + StringUtils.capitalize(operation.getId().getName());
+                writer.addRelativeImport(
+                    paginatorFnName,
+                    paginatorLocalName,
+                    Paths.get(
+                        ".",
+                        CodegenUtils.SOURCE_FOLDER,
+                        PaginationGenerator.getOutputFileLocation(operation)
+                            .replaceFirst("(.*?)pagination(.*?)\\.ts$", "pagination$2")
+                    )
+                );
+                writer.write("$L,", paginatorLocalName);
+            }
+            writer.closeBlock("};");
+        }
+
+        if (hasWaiters) {
+            writer.openBlock("const waiters = {");
+            for (OperationShape operation : closure.getWaitableOperationShapes()) {
+                WaitableTrait waitableTrait = operation.expectTrait(WaitableTrait.class);
+                waitableTrait
+                    .getWaiters()
+                    .forEach((String waiterName, Waiter waiter) -> {
+                        String waiterFnName = "waitUntil" + waiterName;
+                        // note: this should never differ since smithy validation requires TitleCase waiter names.
+                        String waiterLocalName = "waitUntil" + StringUtils.capitalize(waiterName);
+
+                        writer.addRelativeImport(
+                            waiterFnName,
+                            waiterLocalName,
+                            Paths.get(
+                                ".",
+                                CodegenUtils.SOURCE_FOLDER,
+                                WaiterGenerator.getOutputFileLocation(waiterName)
+                                    .replaceFirst("(.*?)waiters(.*?)\\.ts$", "waiters$2")
+                            )
+                        );
+                        writer.write("$L,", waiterLocalName);
+                    });
+            }
+            writer.closeBlock("};");
+        }
+
+        writer.write("");
+
+        // Per-request options accepted by the aggregated client convenience methods.
+        // Superset of the transport options that also carries a call-site MetricsRecorder.
+        String requestOptionsType = aggregateClientName + "RequestOptions";
+        writer.addTypeImport("MetricsRecorder", "__MetricsRecorder", TypeScriptDependency.SMITHY_TYPES);
+        writer.writeDocs("@public");
+        writer.openBlock(
+            "export interface $L extends $T {",
+            "}",
+            requestOptionsType,
+            applicationProtocol.getOptionsType(),
+            () -> {
+                writer.write("metricsRecorder?: __MetricsRecorder<unknown>;");
+            }
+        );
+        writer.write("");
+
+        // Generate an aggregated client interface.
+        writer.openBlock("export interface $L {", "}", aggregateClientName, () -> {
             for (OperationShape operation : containedOperations) {
                 Symbol operationSymbol = symbolProvider.toSymbol(operation);
                 Symbol input = operationSymbol.expectProperty("inputType", Symbol.class);
                 Symbol output = operationSymbol.expectProperty("outputType", Symbol.class);
-
                 writer.addUseImports(operationSymbol);
-                String methodName = StringUtils.uncapitalize(
-                        operationSymbol.getName().replaceAll("Command$", "")
-                );
+                String methodName = StringUtils.uncapitalize(operationSymbol.getName().replaceAll("Command$", ""));
 
                 // Generate a multiple overloaded methods for each command.
-                writer.writeShapeDocs(operation);
-                writer.write("public $L(\n"
-                            + "  args: $T,\n"
-                            + "  options?: $T,\n"
-                            + "): Promise<$T>;", methodName, input, applicationProtocol.getOptionsType(), output);
-                writer.write("public $L(\n"
-                             + "  args: $T,\n"
-                             + "  cb: (err: any, data?: $T) => void\n"
-                             + "): void;", methodName, input, output);
-                writer.write("public $L(\n"
-                            + "  args: $T,\n"
-                            + "  options: $T,\n"
-                            + "  cb: (err: any, data?: $T) => void\n"
-                            + "): void;", methodName, input, applicationProtocol.getOptionsType(), output);
-                writer.openBlock("public $1L(\n"
-                                 + "  args: $2T,\n"
-                                 + "  optionsOrCb?: $3T | ((err: any, data?: $4T) => void),\n"
-                                 + "  cb?: (err: any, data?: $4T) => void\n"
-                                 + "): Promise<$4T> | void { ", "}",
-                        methodName,
-                        input,
-                        applicationProtocol.getOptionsType(),
-                        output,
-                        () -> {
-                    writer.write("const command = new $T(args);\n"
-                                 + "if (typeof optionsOrCb === \"function\") {\n"
-                                 + "  this.send(command, optionsOrCb)\n"
-                                 + "} else if (typeof cb === \"function\") {\n"
-                                 + "  if (typeof optionsOrCb !== \"object\")\n"
-                                 + "    throw new Error(`Expect http options but get $${typeof optionsOrCb}`)\n"
-                                 + "  this.send(command, optionsOrCb || {}, cb)\n"
-                                 + "} else {\n"
-                                 + "  return this.send(command, optionsOrCb);\n"
-                                 + "}", operationSymbol);
-                });
+                writer.writeDocs("@see {@link " + operationSymbol.getName() + "}");
+                boolean inputOptional = model
+                    .getShape(operation.getInputShape())
+                    .map(shape -> shape.getAllMembers().values().stream().noneMatch(MemberShape::isRequired))
+                    .orElse(true);
+                if (inputOptional) {
+                    writer.write("$L(): Promise<$T>;", methodName, output);
+                }
+                writer.write(
+                    """
+                    $1L(
+                      args: $2T,
+                      options?: $3L
+                    ): Promise<$4T>;
+                    $1L(
+                      args: $2T,
+                      cb: (err: any, data?: $4T) => void
+                    ): void;
+                    $1L(
+                      args: $2T,
+                      options: $3L,
+                      cb: (err: any, data?: $4T) => void
+                    ): void;""",
+                    methodName,
+                    input,
+                    requestOptionsType,
+                    output
+                );
                 writer.write("");
             }
+
+            for (OperationShape operation : closure.getPaginatedOperationShapes()) {
+                if (operation.hasTrait(PaginatedTrait.ID)) {
+                    String paginatorLocalName = "paginate" + StringUtils.capitalize(operation.getId().getName());
+
+                    Symbol operationSymbol = symbolProvider.toSymbol(operation);
+                    Symbol input = operationSymbol.expectProperty("inputType", Symbol.class);
+                    Symbol output = operationSymbol.expectProperty("outputType", Symbol.class);
+
+                    writer.addTypeImport("Paginator", null, TypeScriptDependency.SMITHY_TYPES);
+                    writer.addTypeImport("PaginationConfiguration", null, TypeScriptDependency.SMITHY_TYPES);
+
+                    boolean inputOptional = model
+                        .getShape(operation.getInputShape())
+                        .map(shape -> shape.getAllMembers().values().stream().noneMatch(MemberShape::isRequired))
+                        .orElse(true);
+
+                    String inputOptionality = inputOptional ? "?" : "";
+
+                    writer.writeDocs(
+                        """
+                        @see {@link %s}
+                        @param args - command input.
+                        @param paginationConfig - optional pagination config.
+                        @returns AsyncIterable of {@link %s}.""".formatted(operationSymbol.getName(), output.getName())
+                    );
+                    writer.write(
+                        """
+                        $1L(
+                          args$5L: $2T,
+                          paginationConfig?: Omit<$3L, "client">
+                        ): Paginator<$4T>;
+                        """,
+                        paginatorLocalName,
+                        input,
+                        "PaginationConfiguration",
+                        output,
+                        inputOptionality
+                    );
+                }
+            }
+
+            for (OperationShape operation : closure.getWaitableOperationShapes()) {
+                if (operation.hasTrait(WaitableTrait.ID)) {
+                    WaitableTrait waitableTrait = operation.expectTrait(WaitableTrait.class);
+
+                    Symbol operationSymbol = symbolProvider.toSymbol(operation);
+                    Symbol input = operationSymbol.expectProperty("inputType", Symbol.class);
+                    Symbol output = operationSymbol.expectProperty("outputType", Symbol.class);
+
+                    String serviceName = CodegenUtils.getServiceName(settings, model, symbolProvider);
+                    String syntheticBaseExceptionName =
+                        CodegenUtils.getSyntheticBaseExceptionName(serviceName, model);
+                    writer.addRelativeTypeImport(
+                        syntheticBaseExceptionName,
+                        null,
+                        Paths.get(
+                            ".",
+                            CodegenUtils.SOURCE_FOLDER,
+                            "models",
+                            syntheticBaseExceptionName
+                        )
+                    );
+                    String waiterResultType = output.getName() + " | " + syntheticBaseExceptionName;
+
+                    waitableTrait
+                        .getWaiters()
+                        .forEach((String waiterName, Waiter waiter) -> {
+                            String waiterLocalName = "waitUntil" + StringUtils.capitalize(waiterName);
+
+                            writer.addTypeImport("WaiterConfiguration", null, TypeScriptDependency.SMITHY_TYPES);
+                            writer.addTypeImportSubmodule(
+                                "WaiterResult",
+                                null,
+                                TypeScriptDependency.SMITHY_CORE,
+                                SmithyCoreSubmodules.CLIENT
+                            );
+
+                            String waitUntilResultType = WaiterGenerator.computeWaitUntilResultType(
+                                waiter,
+                                output.getName(),
+                                syntheticBaseExceptionName,
+                                settings,
+                                model,
+                                symbolProvider,
+                                writer
+                            );
+
+                            writer.writeDocs(
+                                """
+                                @see {@link %s}
+                                @param args - command input.
+                                @param waiterConfig - `maxWaitTime` in seconds or waiter config object."""
+                                    .formatted(operationSymbol.getName())
+                            );
+                            writer.write(
+                                """
+                                $1L(
+                                  args: $2T,
+                                  waiterConfig: number | Omit<$3L, "client">
+                                ): Promise<WaiterResult<$4L>>;
+                                """,
+                                waiterLocalName,
+                                input,
+                                "WaiterConfiguration<" + aggregateClientName + ">",
+                                waitUntilResultType
+                            );
+                        });
+                }
+            }
+
+            writer.unwrite("\n");
         });
+
+        writer.write("");
+
+        // Generate the client and extend from the bare-bones client.
+        writer.writeShapeDocs(service);
+        writer.write(
+            "export class $L extends $T implements $L {}",
+            aggregateClientName,
+            serviceSymbol,
+            aggregateClientName
+        );
+
+        writer.addImportSubmodule(
+            "createAggregatedClient",
+            null,
+            TypeScriptDependency.SMITHY_CORE,
+            SmithyCoreSubmodules.CLIENT
+        );
+
+        if (hasPaginators && hasWaiters) {
+            writer.write("createAggregatedClient(commands, $L, { paginators, waiters });", aggregateClientName);
+        } else if (hasPaginators) {
+            writer.write("createAggregatedClient(commands, $L, { paginators });", aggregateClientName);
+        } else if (hasWaiters) {
+            writer.write("createAggregatedClient(commands, $L, { waiters });", aggregateClientName);
+        } else {
+            writer.write("createAggregatedClient(commands, $L);", aggregateClientName);
+        }
     }
 }

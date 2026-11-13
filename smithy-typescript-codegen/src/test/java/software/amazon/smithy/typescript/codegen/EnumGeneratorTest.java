@@ -1,3 +1,7 @@
+/*
+ * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 package software.amazon.smithy.typescript.codegen;
 
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -13,47 +17,55 @@ import software.amazon.smithy.model.traits.EnumDefinition;
 import software.amazon.smithy.model.traits.EnumTrait;
 
 public class EnumGeneratorTest {
+
     @Test
     public void generatesNamedEnums() {
         EnumTrait trait = EnumTrait.builder()
-                .addEnum(EnumDefinition.builder().value("FOO").name("FOO").build())
-                .addEnum(EnumDefinition.builder().value("BAR").name("BAR").build())
-                .build();
+            .addEnum(EnumDefinition.builder().value("FOO").name("FOO").build())
+            .addEnum(EnumDefinition.builder().value("BAR").name("BAR").build())
+            .build();
         StringShape shape = StringShape.builder().id("com.foo#Baz").addTrait(trait).build();
         TypeScriptWriter writer = new TypeScriptWriter("foo");
         Model model = Model.assembler()
-                .addShape(shape)
-                .addImport(getClass().getResource("simple-service.smithy"))
-                .assemble()
-                .unwrap();
-        TypeScriptSettings settings = TypeScriptSettings.from(model, Node.objectNodeBuilder()
+            .addShape(shape)
+            .addImport(getClass().getResource("simple-service.smithy"))
+            .assemble()
+            .unwrap();
+        TypeScriptSettings settings = TypeScriptSettings.from(
+            model,
+            Node.objectNodeBuilder()
                 .withMember("package", Node.from("example"))
                 .withMember("packageVersion", Node.from("1.0.0"))
-                .build());
+                .build()
+        );
         Symbol symbol = new SymbolVisitor(model, settings).toSymbol(shape);
         new EnumGenerator(shape, symbol, writer).run();
 
-        assertThat(writer.toString(), containsString("export enum Baz {"));
-        assertThat(writer.toString(), stringContainsInOrder("BAR = \"BAR\",", "FOO = \"FOO\""));
+        assertThat(writer.toString(), containsString("export const Baz = {"));
+        assertThat(writer.toString(), stringContainsInOrder("BAR: \"BAR\",", "FOO: \"FOO\""));
+        assertThat(writer.toString(), containsString("export type Baz = (typeof Baz)[keyof typeof Baz];"));
     }
 
     @Test
     public void generatesUnnamedEnums() {
         EnumTrait trait = EnumTrait.builder()
-                .addEnum(EnumDefinition.builder().value("FOO").build())
-                .addEnum(EnumDefinition.builder().value("BAR").build())
-                .build();
+            .addEnum(EnumDefinition.builder().value("FOO").build())
+            .addEnum(EnumDefinition.builder().value("BAR").build())
+            .build();
         StringShape shape = StringShape.builder().id("com.foo#Baz").addTrait(trait).build();
         TypeScriptWriter writer = new TypeScriptWriter("foo");
         Model model = Model.assembler()
-                .addShape(shape)
-                .addImport(getClass().getResource("simple-service.smithy"))
-                .assemble()
-                .unwrap();
-        TypeScriptSettings settings = TypeScriptSettings.from(model, Node.objectNodeBuilder()
+            .addShape(shape)
+            .addImport(getClass().getResource("simple-service.smithy"))
+            .assemble()
+            .unwrap();
+        TypeScriptSettings settings = TypeScriptSettings.from(
+            model,
+            Node.objectNodeBuilder()
                 .withMember("package", Node.from("example"))
                 .withMember("packageVersion", Node.from("1.0.0"))
-                .build());
+                .build()
+        );
         Symbol symbol = new SymbolVisitor(model, settings).toSymbol(shape);
         new EnumGenerator(shape, symbol, writer).run();
 

@@ -1,0 +1,631 @@
+$version: "2.0"
+
+namespace org.xyz.v1
+
+use org.xyz.secondary#HttpLabelCommand
+use smithy.protocols#rpcv2Cbor
+use smithy.protocols#rpcv2Json
+use smithy.rules#clientContextParams
+use smithy.rules#contextParam
+use smithy.rules#endpointRuleSet
+use smithy.rules#staticContextParams
+use smithy.test#httpRequestTests
+use smithy.test#httpResponseTests
+use smithy.waiters#waitable
+
+@rpcv2Cbor(
+    http: ["h2", "http/1.1"]
+    eventStreamHttp: ["h2"]
+)
+@rpcv2Json
+@documentation("xyz interfaces")
+@httpApiKeyAuth(name: "X-Api-Key", in: "header")
+@clientContextParams(
+    customParam: { type: "string", documentation: "Custom parameter" }
+    region: { type: "string", documentation: "Conflicting with built-in region" }
+    enableFeature: { type: "boolean", documentation: "Feature toggle flag" }
+    debugMode: { type: "boolean", documentation: "Debug mode flag" }
+    nonConflictingParam: { type: "string", documentation: "Non-conflicting parameter" }
+    logger: { type: "string", documentation: "Conflicting logger parameter" }
+    ApiKey: { type: "string", documentation: "ApiKey" }
+)
+@endpointRuleSet({
+    version: "1.0"
+    parameters: {
+        endpoint: { builtIn: "SDK::Endpoint", documentation: "The endpoint used to send the request.", type: "string" }
+        ApiKey: { required: false, documentation: "ApiKey", type: "string" }
+        region: { type: "string", required: false, documentation: "AWS region" }
+        customParam: { type: "string", required: true, default: "default-custom-value", documentation: "Custom parameter for testing" }
+        enableFeature: { type: "boolean", required: true, default: true, documentation: "Feature toggle with default" }
+        debugMode: { type: "boolean", required: true, default: false, documentation: "Debug mode with default" }
+        nonConflictingParam: { type: "string", required: true, default: "non-conflict-default", documentation: "Non-conflicting with default" }
+        logger: { type: "string", required: true, default: "default-logger", documentation: "Conflicting logger with default" }
+        CustomHeaderValue: { type: "string", required: false, documentation: "Value to send as x-custom-header" }
+        OverloadedParam: { type: "string", required: true, default: "overloaded!", documentation: "both a static and non-static context param." }
+    }
+    rules: [
+        {
+            conditions: [
+                {
+                    fn: "isSet"
+                    argv: [
+                        {
+                            ref: "endpoint"
+                        }
+                    ]
+                }
+                {
+                    fn: "isSet"
+                    argv: [
+                        {
+                            ref: "ApiKey"
+                        }
+                    ]
+                }
+                {
+                    fn: "isSet"
+                    argv: [
+                        {
+                            ref: "CustomHeaderValue"
+                        }
+                    ]
+                }
+            ]
+            endpoint: {
+                url: "{endpoint}"
+                properties: {}
+                headers: {
+                    "x-api-key": ["{ApiKey}"]
+                    "x-custom-header": ["{CustomHeaderValue}"]
+                }
+            }
+            type: "endpoint"
+        }
+        {
+            conditions: [
+                {
+                    fn: "isSet"
+                    argv: [
+                        {
+                            ref: "endpoint"
+                        }
+                    ]
+                }
+                {
+                    fn: "isSet"
+                    argv: [
+                        {
+                            ref: "ApiKey"
+                        }
+                    ]
+                }
+            ]
+            endpoint: {
+                url: "{endpoint}"
+                properties: {}
+                headers: {
+                    "x-api-key": ["{ApiKey}"]
+                }
+            }
+            type: "endpoint"
+        }
+        {
+            conditions: [
+                {
+                    fn: "isSet"
+                    argv: [
+                        {
+                            ref: "endpoint"
+                        }
+                    ]
+                }
+            ]
+            endpoint: {
+                url: "{endpoint}"
+                properties: {}
+                headers: {}
+            }
+            type: "endpoint"
+        }
+        {
+            conditions: []
+            error: "endpoint is not set - you must configure an endpoint."
+            type: "error"
+        }
+    ]
+})
+service XYZService {
+    version: "1.0"
+    operations: [
+        GetNumbers
+        TradeEventStream
+        PublishEvents
+        SubscribeToEvents
+        camelCaseOperation
+        HttpLabelCommand
+        HostPrefixOperation
+        ValidatedOperation
+        UnionMemberCollisionOperation
+    ]
+    errors: [
+        MainServiceLinkedError
+    ]
+}
+
+/// Regression coverage for union variant interface shadowing (#2280).
+@http(method: "POST", uri: "/union-member-collision", code: 200)
+operation UnionMemberCollisionOperation {
+    input: UnionMemberCollisionInput
+    output: UnionMemberCollisionOutput
+}
+
+@input
+structure UnionMemberCollisionInput {
+    thing: Thing
+}
+
+@output
+structure UnionMemberCollisionOutput {
+    thing: Thing
+}
+
+union Thing {
+    // Variant interface collides with the target structure `WidgetMember` (#2280).
+    widget: WidgetMember
+
+    gadget: Gadget
+}
+
+structure WidgetMember {
+    widgetId: String
+}
+
+structure Gadget {
+    gadgetId: String
+}
+
+@error("client")
+@httpError(400)
+structure MainServiceLinkedError {}
+
+@waitable(
+    NumbersAligned: {
+        documentation: "wait until the numbers align"
+        acceptors: [
+            {
+                state: "success"
+                matcher: { success: true }
+            }
+            {
+                state: "retry"
+                matcher: { errorType: "MysteryThrottlingError" }
+            }
+            {
+                state: "failure"
+                matcher: { errorType: "HaltError" }
+            }
+        ]
+    }
+    NumbersMisaligned: {
+        documentation: "wait until the numbers don't align"
+        acceptors: [
+            {
+                state: "retry"
+                matcher: { success: true }
+            }
+            {
+                state: "success"
+                matcher: { errorType: "HaltError" }
+            }
+        ]
+    }
+    NumbersWhatDoTheyDoAnyway: {
+        documentation: "wait until the numbers align or don't align"
+        acceptors: [
+            {
+                state: "success"
+                matcher: { success: true }
+            }
+            {
+                state: "success"
+                matcher: { errorType: "HaltError" }
+            }
+        ]
+    }
+)
+@paginated(inputToken: "startToken", outputToken: "nextToken", pageSize: "maxResults", items: "numbers")
+@readonly
+@httpRequestTests([
+    {
+        id: "GetNumbersRequestExample"
+        protocol: "smithy.protocols#rpcv2Cbor"
+        method: "POST"
+        uri: "/service/XYZService/operation/GetNumbers"
+        tags: ["serde-benchmark"]
+    }
+    {
+        id: "EndpointResolvedHeadersApplied"
+        protocol: "smithy.protocols#rpcv2Cbor"
+        method: "POST"
+        uri: "/service/XYZService/operation/GetNumbers"
+        params: { customHeaderInput: "test-custom-value" }
+        headers: { "x-custom-header": "test-custom-value" }
+    }
+])
+@httpResponseTests([
+    {
+        id: "GetNumbersResponseExample"
+        protocol: "smithy.protocols#rpcv2Cbor"
+        code: 200
+        headers: { "smithy-protocol": "rpc-v2-cbor" }
+        tags: ["serde-benchmark"]
+    }
+])
+@http(method: "POST", uri: "/get-numbers", code: 200)
+operation GetNumbers {
+    input: GetNumbersRequest
+    output: GetNumbersResponse
+    errors: [
+        CodedThrottlingError
+        MysteryThrottlingError
+        RetryableError
+        HaltError
+        XYZServiceServiceException
+    ]
+}
+
+@input
+structure GetNumbersRequest {
+    bigDecimal: BigDecimal
+
+    bigInteger: BigInteger
+
+    @documentation("This is deprecated documentation annotation")
+    @deprecated
+    fieldWithoutMessage: String
+
+    @documentation("This is deprecated documentation annotation")
+    @deprecated(message: "This field has been deprecated", since: "3.0")
+    fieldWithMessage: String
+
+    startToken: String
+
+    maxResults: Integer
+
+    @contextParam(name: "CustomHeaderValue")
+    customHeaderInput: String
+
+    numbers: IntegerMap
+
+    sparseNumbers: SparseIntegerMap
+}
+
+@output
+structure GetNumbersResponse {
+    bigDecimal: BigDecimal
+
+    bigInteger: BigInteger
+
+    numbers: IntegerList
+
+    sparseNumbers: SparseIntegerList
+
+    nextToken: String
+
+    @documentation("This is deprecated documentation annotation")
+    @deprecated(message: "these numbers are not used anymore", since: "1685-12-31")
+    deprecatedNumbers: IntegerList
+
+    @documentation("This is deprecated documentation annotation")
+    @deprecated(since: "1685-12-31")
+    deprecatedNumbersWithoutExplanation: IntegerList
+
+    @deprecated(message: "these numbers are not used anymore??")
+    deprecatedNumbersWithoutChronology: IntegerList
+
+    @deprecated
+    inexplicablyDeprecatedNumbers: IntegerList
+}
+
+list IntegerList {
+    member: Integer
+}
+
+@sparse
+list SparseIntegerList {
+    member: Integer
+}
+
+map IntegerMap {
+    key: String
+    value: Integer
+}
+
+@sparse
+map SparseIntegerMap {
+    key: String
+    value: Integer
+}
+
+@error("client")
+@retryable(throttling: true)
+@httpError(429)
+structure CodedThrottlingError {}
+
+@error("client")
+@retryable(throttling: true)
+structure MysteryThrottlingError {}
+
+@error("client")
+@retryable
+structure RetryableError {
+    message: String
+}
+
+@error("client")
+structure HaltError {
+    message: String
+}
+
+@error("client")
+structure XYZServiceServiceException {}
+
+@http(method: "POST", uri: "/trade-event-stream", code: 200)
+operation TradeEventStream {
+    input: TradeEventStreamRequest
+    output: TradeEventStreamResponse
+}
+
+structure TradeEventStreamRequest {
+    @httpHeader("x-session-id")
+    sessionId: String
+
+    @httpPayload
+    eventStream: TradeEvents
+}
+
+structure TradeEventStreamResponse {
+    @httpHeader("x-session-id")
+    sessionId: String
+
+    @httpPayload
+    eventStream: TradeEvents
+}
+
+@streaming
+union TradeEvents {
+    alpha: Alpha
+    beta: Unit
+    gamma: Gamma
+    delta: DifferentShapeName
+}
+
+structure Alpha {
+    id: String
+    timestamp: Timestamp
+}
+
+structure Gamma {
+    @eventHeader
+    sequenceNumber: Integer
+
+    @eventPayload
+    payload: GammaPayload
+}
+
+structure GammaPayload {
+    message: String
+    values: IntegerList
+}
+
+// this tests that the event stream member associated with it
+// generates using :event-type: delta rather than :event-type: DifferentShapeName.
+structure DifferentShapeName {
+    name: String
+    number: Integer
+}
+
+/// Input-only event stream: client sends events, server responds with a summary.
+@http(method: "POST", uri: "/publish-events", code: 200)
+operation PublishEvents {
+    input: PublishEventsRequest
+    output: PublishEventsResponse
+}
+
+structure PublishEventsRequest {
+    @httpHeader("x-channel")
+    channel: String
+
+    @httpPayload
+    events: PublishEventStream
+}
+
+structure PublishEventsResponse {
+    @httpHeader("x-event-count")
+    eventCount: Integer
+
+    message: String
+}
+
+@streaming
+union PublishEventStream {
+    log: LogEvent
+    metric: MetricEvent
+}
+
+structure LogEvent {
+    level: String
+    message: String
+}
+
+structure MetricEvent {
+    name: String
+    value: Double
+}
+
+/// Output-only event stream: client sends a subscription request, server streams events.
+@http(method: "POST", uri: "/subscribe-to-events", code: 200)
+operation SubscribeToEvents {
+    input: SubscribeToEventsRequest
+    output: SubscribeToEventsResponse
+}
+
+structure SubscribeToEventsRequest {
+    @httpHeader("x-channel")
+    channel: String
+
+    @httpHeader("x-max-events")
+    maxEvents: Integer
+}
+
+structure SubscribeToEventsResponse {
+    @httpHeader("x-subscription-id")
+    subscriptionId: String
+
+    @httpPayload
+    events: SubscribeEventStream
+}
+
+@streaming
+union SubscribeEventStream {
+    notification: NotificationEvent
+    heartbeat: HeartbeatEvent
+}
+
+structure NotificationEvent {
+    topic: String
+    payload: String
+}
+
+structure HeartbeatEvent {
+    timestamp: Timestamp
+}
+
+@rpcv2Cbor
+@documentation("a second service in the same model, unused.")
+service UnusedService {
+    version: "1.0"
+    operations: [
+        UnusedOperation
+    ]
+    errors: [
+        UnusedServiceLinkedError
+    ]
+}
+
+@http(method: "POST", uri: "/unused", code: 200)
+operation UnusedOperation {
+    input: Unit
+    output: Unit
+    errors: [
+        UnusedServiceOperationLinkedError
+    ]
+}
+
+@error("client")
+@httpError(400)
+structure UnusedServiceOperationLinkedError {}
+
+@error("client")
+@httpError(400)
+structure UnusedServiceLinkedError {}
+
+@error("client")
+@httpError(400)
+structure CompletelyUnlinkedError {}
+
+@paginated(inputToken: "token", outputToken: "token", items: "results")
+@readonly
+@http(method: "POST", uri: "/camel-case", code: 200)
+operation camelCaseOperation {
+    input := {
+        token: String
+
+        @contextParam(name: "OverloadedParam")
+        overloadedParam: String
+    }
+
+    output := {
+        token: String
+        results: Blobs
+    }
+}
+
+list Blobs {
+    member: Blob
+}
+
+@staticContextParams(
+    OverloadedParam: { value: "from-host-prefix-operation" }
+)
+@endpoint(hostPrefix: "{AccountId}.")
+operation HostPrefixOperation {
+    input: HostPrefixOperationInput
+    output: Unit
+}
+
+structure HostPrefixOperationInput {
+    @required
+    @hostLabel
+    AccountId: String
+}
+
+/// Operation that demonstrates various constraint traits for validation testing.
+@http(method: "POST", uri: "/validated", code: 200)
+operation ValidatedOperation {
+    input: ValidatedInput
+    output: ValidatedOutput
+}
+
+@input
+structure ValidatedInput {
+    /// Must be between 1 and 100 characters.
+    @length(min: 1, max: 100)
+    username: String
+
+    /// Must be between 1 and 150 (inclusive).
+    @range(min: 1, max: 150)
+    age: Integer
+
+    /// Must match an email-like pattern.
+    @pattern("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$")
+    email: String
+
+    /// A list that must have between 1 and 5 items.
+    @length(min: 1, max: 5)
+    tags: TagList
+
+    /// A list where each item must be unique.
+    uniqueTags: UniqueTagList
+
+    /// Nested structure with its own constraints.
+    address: ConstrainedAddress
+}
+
+@output
+structure ValidatedOutput {
+    message: String
+}
+
+list TagList {
+    member: Tag
+}
+
+@uniqueItems
+list UniqueTagList {
+    member: Tag
+}
+
+/// Each tag must be 1-50 characters.
+@length(min: 1, max: 50)
+string Tag
+
+structure ConstrainedAddress {
+    /// Zip code must be exactly 5 digits.
+    @pattern("^[0-9]{5}$")
+    zipCode: String
+
+    /// State abbreviation must be exactly 2 characters.
+    @length(min: 2, max: 2)
+    state: String
+}

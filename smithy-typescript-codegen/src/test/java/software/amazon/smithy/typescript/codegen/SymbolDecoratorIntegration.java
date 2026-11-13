@@ -1,3 +1,7 @@
+/*
+ * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 package software.amazon.smithy.typescript.codegen;
 
 import software.amazon.smithy.codegen.core.Symbol;
@@ -11,11 +15,12 @@ import software.amazon.smithy.typescript.codegen.integration.TypeScriptIntegrati
  * enabled by setting "__customServiceName" in the provided settings object.
  */
 public final class SymbolDecoratorIntegration implements TypeScriptIntegration {
+
     @Override
     public SymbolProvider decorateSymbolProvider(
-            Model model,
-            TypeScriptSettings settings,
-            SymbolProvider symbolProvider
+        Model model,
+        TypeScriptSettings settings,
+        SymbolProvider symbolProvider
     ) {
         String name = settings.getPluginSettings().getStringMemberOrDefault("__customServiceName", null);
 

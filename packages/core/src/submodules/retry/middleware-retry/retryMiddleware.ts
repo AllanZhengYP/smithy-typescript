@@ -1,0 +1,174 @@
+import { NoOpLogger } from "@smithy/core/client";
+import { HttpRequest } from "@smithy/core/protocols";
+import { v4 } from "@smithy/core/serde";
+import { SMITHY_CONTEXT_KEY } from "@smithy/types";
+import type {
+  AbsoluteLocation,
+  FinalizeHandler,
+  FinalizeHandlerArguments,
+  FinalizeHandlerOutput,
+  FinalizeRequestHandlerOptions,
+  HandlerExecutionContext,
+  Logger,
+  MetadataBearer,
+  Pluggable,
+  RetryErrorInfo,
+  RetryErrorType,
+  RetryStrategy,
+  RetryStrategyV2,
+  RetryToken,
+  SdkError,
+} from "@smithy/types";
+
+import {
+  isServerError,
+  isThrottlingError,
+  isTransientError,
+} from "../service-error-classification/service-error-classification";
+import { isAbortError, race } from "../util-retry/race";
+import { INVOCATION_ID_HEADER, REQUEST_HEADER } from "../util-retry/constants";
+import type { RetryResolvedConfig } from "./configurations";
+import { parseRetryAfterHeader } from "./parseRetryAfterHeader";
+import { asSdkError } from "./util";
+
+/**
+ * @internal
+ */
+export type IsStreamingPayload = (request: HttpRequest) => boolean;
+
+/**
+ * @internal
+ */
+export function bindRetryMiddleware(isStreamingPayload: IsStreamingPayload) {
+  return (options: RetryResolvedConfig) =>
+    <Output extends MetadataBearer = MetadataBearer>(
+      next: FinalizeHandler<any, Output>,
+      context: HandlerExecutionContext
+    ): FinalizeHandler<any, Output> =>
+    async (args: FinalizeHandlerArguments<any>): Promise<FinalizeHandlerOutput<Output>> => {
+      let retryStrategy = await options.retryStrategy();
+      const maxAttempts = await options.maxAttempts();
+      const abortSignal = context[SMITHY_CONTEXT_KEY]?.abortSignal;
+
+      if (isRetryStrategyV2(retryStrategy)) {
+        retryStrategy = retryStrategy as RetryStrategyV2;
+        const retryTokenScope = (context["partition_id"] ?? "") + (context.__retryLongPoll ? ":longpoll" : "");
+        let retryToken: RetryToken = await race(retryStrategy.acquireInitialRetryToken(retryTokenScope), abortSignal);
+        let lastError: SdkError = new Error();
+        let attempts = 0;
+        let totalRetryDelay = 0;
+        const { request } = args;
+        const isRequest = HttpRequest.isInstance(request);
+
+        if (isRequest) {
+          request.headers[INVOCATION_ID_HEADER] = v4();
+        }
+        while (true) {
+          try {
+            if (isRequest) {
+              request.headers[REQUEST_HEADER] = `attempt=${attempts + 1}; max=${maxAttempts}`;
+            }
+            const { response, output } = await next(args);
+            retryStrategy.recordSuccess(retryToken);
+            output.$metadata.attempts = attempts + 1;
+            output.$metadata.totalRetryDelay = totalRetryDelay;
+            return { response, output };
+          } catch (e: any) {
+            const retryErrorInfo = getRetryErrorInfo(e, options.logger);
+            lastError = asSdkError(e);
+
+            if (isRequest && isStreamingPayload(request)) {
+              (context.logger instanceof NoOpLogger ? console : context.logger)?.warn(
+                "An error was encountered in a non-retryable streaming request."
+              );
+              throw lastError;
+            }
+
+            try {
+              retryToken = await race(retryStrategy.refreshRetryTokenForRetry(retryToken, retryErrorInfo), abortSignal);
+            } catch (refreshError) {
+              if (abortSignal?.aborted && isAbortError(refreshError)) {
+                throw refreshError;
+              }
+              if (!lastError.$metadata) {
+                lastError.$metadata = {};
+              }
+              lastError.$metadata.attempts = attempts + 1;
+              lastError.$metadata.totalRetryDelay = totalRetryDelay;
+              throw lastError;
+            }
+            attempts = retryToken.getRetryCount();
+            const delay = retryToken.getRetryDelay();
+            totalRetryDelay += (retryToken?.$retryLog?.acquisitionDelay ?? 0) + delay;
+            if (delay > 0) {
+              // for internal V2 (SRA) retryStrategies, delay should be zero going forward.
+              // This cooldown is for backwards compatibility with a user-implemented strategy
+              // which returns a token with delay.
+              await race(new Promise((resolve) => setTimeout(resolve, delay)), abortSignal);
+            }
+          }
+        }
+      } else {
+        retryStrategy = retryStrategy as RetryStrategy;
+        if (retryStrategy?.mode) {
+          context.userAgent = [...(context.userAgent || []), ["cfg/retry-mode", retryStrategy.mode]];
+        }
+
+        return retryStrategy.retry(next, args);
+      }
+    };
+}
+
+const isRetryStrategyV2 = (retryStrategy: RetryStrategy | RetryStrategyV2) =>
+  typeof (retryStrategy as RetryStrategyV2).acquireInitialRetryToken !== "undefined" &&
+  typeof (retryStrategy as RetryStrategyV2).refreshRetryTokenForRetry !== "undefined" &&
+  typeof (retryStrategy as RetryStrategyV2).recordSuccess !== "undefined";
+
+const getRetryErrorInfo = (error: SdkError, logger?: Logger): RetryErrorInfo => {
+  const errorInfo: RetryErrorInfo = {
+    error,
+    errorType: getRetryErrorType(error),
+  };
+  const retryAfterHint = parseRetryAfterHeader(error.$response, logger);
+  if (retryAfterHint) {
+    errorInfo.retryAfterHint = retryAfterHint;
+  }
+  return errorInfo;
+};
+
+const getRetryErrorType = (error: SdkError): RetryErrorType => {
+  if (isThrottlingError(error)) {
+    return "THROTTLING";
+  }
+  if (isTransientError(error)) {
+    return "TRANSIENT";
+  }
+  if (isServerError(error)) {
+    return "SERVER_ERROR";
+  }
+  return "CLIENT_ERROR";
+};
+
+/**
+ * @internal
+ */
+export const retryMiddlewareOptions: FinalizeRequestHandlerOptions & AbsoluteLocation = {
+  name: "retryMiddleware",
+  tags: ["RETRY"],
+  step: "finalizeRequest",
+  priority: "high",
+  override: true,
+};
+
+/**
+ * @internal
+ */
+export function bindGetRetryPlugin(isStreamingPayload: IsStreamingPayload) {
+  const retryMiddleware = bindRetryMiddleware(isStreamingPayload);
+
+  return (options: RetryResolvedConfig): Pluggable<any, any> => ({
+    applyToStack: (clientStack) => {
+      clientStack.add(retryMiddleware(options), retryMiddlewareOptions);
+    },
+  });
+}

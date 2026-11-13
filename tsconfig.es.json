@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "importHelpers": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "noEmitHelpers": false,
+    "target": "es2022",
+    "noCheck": true,
+    "paths": {}
+  }
+}

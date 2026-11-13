@@ -1,22 +1,14 @@
 /*
- * Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
- *
- * Licensed under the Apache License, Version 2.0 (the "License").
- * You may not use this file except in compliance with the License.
- * A copy of the License is located at
- *
- *  http://aws.amazon.com/apache2.0
- *
- * or in the "license" file accompanying this file. This file is distributed
- * on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either
- * express or implied. See the License for the specific language governing
- * permissions and limitations under the License.
+ * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
  */
-
 package software.amazon.smithy.typescript.codegen.integration;
 
 import java.util.Collection;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.TreeSet;
 import java.util.stream.Collectors;
 import software.amazon.smithy.codegen.core.CodegenException;
 import software.amazon.smithy.codegen.core.Symbol;
@@ -30,6 +22,7 @@ import software.amazon.smithy.typescript.codegen.ApplicationProtocol;
 import software.amazon.smithy.typescript.codegen.TypeScriptDelegator;
 import software.amazon.smithy.typescript.codegen.TypeScriptSettings;
 import software.amazon.smithy.typescript.codegen.TypeScriptWriter;
+import software.amazon.smithy.typescript.codegen.util.StringStore;
 import software.amazon.smithy.utils.CaseUtils;
 import software.amazon.smithy.utils.SmithyUnstableApi;
 
@@ -102,21 +95,28 @@ public interface ProtocolGenerator {
      * @return Returns the resolved application protocol object.
      */
     default ApplicationProtocol resolveApplicationProtocol(
-            ServiceShape service,
-            Collection<ProtocolGenerator> protocolGenerators,
-            ApplicationProtocol other
+        ServiceShape service,
+        Collection<ProtocolGenerator> protocolGenerators,
+        ApplicationProtocol other
     ) {
         if (!getApplicationProtocol().equals(other)) {
-            String protocolNames = protocolGenerators.stream()
-                    .map(ProtocolGenerator::getProtocol)
-                    .map(ShapeId::getName)
-                    .sorted()
-                    .collect(Collectors.joining(", "));
-            throw new CodegenException(String.format(
-                    "All of the protocols generated for a service must be runtime compatible, but "
-                    + "protocol `%s` is incompatible with other application protocols: [%s]. Please pick a "
-                    + "set of compatible protocols using the `protocols` option when generating %s.",
-                    getProtocol().getName(), protocolNames, service.getId()));
+            String protocolNames = protocolGenerators
+                .stream()
+                .map(ProtocolGenerator::getProtocol)
+                .map(ShapeId::getName)
+                .sorted()
+                .collect(Collectors.joining(", "));
+            throw new CodegenException(
+                String.format(
+                    "All of the protocols generated for a service must be runtime compatible, but " +
+                        "protocol `%s` is incompatible with other application protocols: [%s]. Please pick a "
+                        +
+                        "set of compatible protocols using the `protocols` option when generating %s.",
+                    getProtocol().getName(),
+                    protocolNames,
+                    service.getId()
+                )
+            );
         }
 
         return other;
@@ -127,8 +127,7 @@ public interface ProtocolGenerator {
      *
      * @param context Serde context.
      */
-    default void generateSharedComponents(GenerationContext context) {
-    }
+    default void generateSharedComponents(GenerationContext context) {}
 
     /**
      * Generates the code used to serialize the shapes of a service
@@ -211,7 +210,23 @@ public interface ProtocolGenerator {
     }
 
     /**
-     * Generates the name of a serializer function for shapes of a service that is not protocol-specific.
+     * @param symbol The symbol the deserializer function is being generated for.
+     * @return Returns the generated function short name.
+     */
+    static String getSerFunctionShortName(Symbol symbol) {
+        // e.g., se_ES for ExecuteStatement
+        String functionName = "se_";
+        // Update the function to have a component based on the symbol.
+        functionName += ProtocolGenerator.getSerdeFunctionSymbolComponent(
+            symbol,
+            symbol.expectProperty("shape", Shape.class)
+        );
+        return functionName;
+    }
+
+    /**
+     * Generates the name of a serializer function for shapes of a service that is not
+     * protocol-specific.
      *
      * @param symbol The symbol the serializer function is being generated for.
      * @return Returns the generated function name.
@@ -239,6 +254,21 @@ public interface ProtocolGenerator {
     }
 
     /**
+     * @param symbol The symbol the deserializer function is being generated for.
+     * @return Returns the generated function short name.
+     */
+    static String getDeserFunctionShortName(Symbol symbol) {
+        // e.g., de_ES for ExecuteStatement
+        String functionName = "de_";
+        // Update the function to have a component based on the symbol.
+        functionName += ProtocolGenerator.getSerdeFunctionSymbolComponent(
+            symbol,
+            symbol.expectProperty("shape", Shape.class)
+        );
+        return functionName;
+    }
+
+    /**
      * Generates the name of a deserializer function for shapes of a service that is not protocol-specific.
      *
      * @param symbol The symbol the deserializer function is being generated for.
@@ -246,8 +276,7 @@ public interface ProtocolGenerator {
      */
     static String getGenericDeserFunctionName(Symbol symbol) {
         // e.g., deserializeExecuteStatement
-        return "deserialize"
-                + getSerdeFunctionSymbolComponent(symbol, symbol.expectProperty("shape", Shape.class));
+        return "deserialize" + getSerdeFunctionSymbolComponent(symbol, symbol.expectProperty("shape", Shape.class));
     }
 
     static String getSerdeFunctionSymbolComponent(Symbol symbol, Shape shape) {
@@ -276,9 +305,35 @@ public interface ProtocolGenerator {
     }
 
     /**
+     * Returns a map of error names to their {@link ShapeId}.
+     *
+     * @param context the generation context
+     * @param operations the operation shapes to retrieve errors for
+     * @return map of error names to {@link ShapeId}
+     */
+    default Map<String, ShapeId> getOperationErrors(GenerationContext context, Collection<OperationShape> operations) {
+        Map<String, ShapeId> errors = new LinkedHashMap<>();
+        for (OperationShape operation : operations) {
+            errors.putAll(getOperationErrors(context, operation));
+        }
+        return errors;
+    }
+
+    /**
+     * @return map of fully qualified shape id to aliases and/or short names that should map to the same error.
+     */
+    default Map<String, TreeSet<String>> getErrorAliases(
+        GenerationContext context,
+        Collection<OperationShape> operations
+    ) {
+        return Collections.emptyMap();
+    }
+
+    /**
      * Context object used for service serialization and deserialization.
      */
     class GenerationContext {
+
         private TypeScriptSettings settings;
         private Model model;
         private ServiceShape service;
@@ -286,6 +341,7 @@ public interface ProtocolGenerator {
         private TypeScriptDelegator writerDelegator;
         private TypeScriptWriter writer;
         private String protocolName;
+        private StringStore stringStore = new StringStore();
 
         public TypeScriptSettings getSettings() {
             return settings;
@@ -372,6 +428,10 @@ public interface ProtocolGenerator {
             GenerationContext copyContext = copy();
             copyContext.setWriter(newWriter);
             return copyContext;
+        }
+
+        public StringStore getStringStore() {
+            return stringStore;
         }
     }
 }

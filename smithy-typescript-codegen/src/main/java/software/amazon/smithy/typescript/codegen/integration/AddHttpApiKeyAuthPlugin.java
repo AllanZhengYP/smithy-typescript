@@ -1,28 +1,15 @@
 /*
- * Copyright 2021 Amazon.com, Inc. or its affiliates. All Rights Reserved.
- *
- * Licensed under the Apache License, Version 2.0 (the "License").
- * You may not use this file except in compliance with the License.
- * A copy of the License is located at
- *
- *  http://aws.amazon.com/apache2.0
- *
- * or in the "license" file accompanying this file. This file is distributed
- * on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either
- * express or implied. See the License for the specific language governing
- * permissions and limitations under the License.
+ * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
  */
-
 package software.amazon.smithy.typescript.codegen.integration;
 
 import java.nio.file.Paths;
 import java.util.HashMap;
 import java.util.List;
-import java.util.Set;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import software.amazon.smithy.codegen.core.Symbol;
-import software.amazon.smithy.codegen.core.SymbolDependency;
 import software.amazon.smithy.model.Model;
 import software.amazon.smithy.model.knowledge.ServiceIndex;
 import software.amazon.smithy.model.knowledge.TopDownIndex;
@@ -32,6 +19,7 @@ import software.amazon.smithy.model.traits.HttpApiKeyAuthTrait;
 import software.amazon.smithy.model.traits.OptionalAuthTrait;
 import software.amazon.smithy.typescript.codegen.CodegenUtils;
 import software.amazon.smithy.typescript.codegen.TypeScriptCodegenContext;
+import software.amazon.smithy.typescript.codegen.TypeScriptDependency;
 import software.amazon.smithy.typescript.codegen.TypeScriptSettings;
 import software.amazon.smithy.typescript.codegen.TypeScriptWriter;
 import software.amazon.smithy.utils.IoUtils;
@@ -40,11 +28,21 @@ import software.amazon.smithy.utils.SmithyInternalApi;
 
 /**
  * Add config and middleware to support a service with the @httpApiKeyAuth trait.
+ *
+ * This is legacy auth behavior, and is no longer in development.
  */
 @SmithyInternalApi
 public final class AddHttpApiKeyAuthPlugin implements TypeScriptIntegration {
 
     public static final String INTEGRATION_NAME = "HttpApiKeyAuth";
+
+    /**
+     * Integration should be used only for service codegen when the `useLegacyAuth` flag is true.
+     */
+    @Override
+    public boolean matchesSettings(TypeScriptSettings settings) {
+        return settings.useLegacyAuth() && settings.getOptionalService().isPresent();
+    }
 
     /**
      * Plug into code generation for the client.
@@ -63,40 +61,60 @@ public final class AddHttpApiKeyAuthPlugin implements TypeScriptIntegration {
         return ListUtils.of(
             // Add the config if the service uses HTTP API key authorization.
             RuntimeClientPlugin.builder()
-                    .inputConfig(Symbol.builder()
-                            .namespace("./" + CodegenUtils.SOURCE_FOLDER + "/middleware/" + INTEGRATION_NAME, "/")
-                            .name("HttpApiKeyAuthInputConfig")
-                            .build())
-                    .resolvedConfig(Symbol.builder()
-                            .namespace("./" + CodegenUtils.SOURCE_FOLDER + "/middleware/" + INTEGRATION_NAME, "/")
-                            .name("HttpApiKeyAuthResolvedConfig")
-                            .build())
-                    .resolveFunction(Symbol.builder()
-                            .namespace("./" + CodegenUtils.SOURCE_FOLDER + "/middleware/" + INTEGRATION_NAME, "/")
-                            .name("resolveHttpApiKeyAuthConfig")
-                            .build())
-                    .servicePredicate((m, s) -> hasEffectiveHttpApiKeyAuthTrait(m, s))
-                    .build(),
-
+                .inputConfig(
+                    Symbol.builder()
+                        .namespace(
+                            "./" + CodegenUtils.SOURCE_FOLDER + "/middleware/" + INTEGRATION_NAME,
+                            "/"
+                        )
+                        .name("HttpApiKeyAuthInputConfig")
+                        .build()
+                )
+                .resolvedConfig(
+                    Symbol.builder()
+                        .namespace(
+                            "./" + CodegenUtils.SOURCE_FOLDER + "/middleware/" + INTEGRATION_NAME,
+                            "/"
+                        )
+                        .name("HttpApiKeyAuthResolvedConfig")
+                        .build()
+                )
+                .resolveFunction(
+                    Symbol.builder()
+                        .namespace(
+                            "./" + CodegenUtils.SOURCE_FOLDER + "/middleware/" + INTEGRATION_NAME,
+                            "/"
+                        )
+                        .name("resolveHttpApiKeyAuthConfig")
+                        .build()
+                )
+                .servicePredicate((m, s) -> hasEffectiveHttpApiKeyAuthTrait(m, s))
+                .build(),
             // Add the middleware to operations that use HTTP API key authorization.
             RuntimeClientPlugin.builder()
-                    .pluginFunction(Symbol.builder()
-                            .namespace("./" + CodegenUtils.SOURCE_FOLDER + "/middleware/" + INTEGRATION_NAME, "/")
-                            .name("getHttpApiKeyAuthPlugin")
-                            .build())
-                    .additionalPluginFunctionParamsSupplier((m, s, o) -> new HashMap<String, Object>() {{
-                            // It's safe to do expectTrait() because the operation predicate ensures that the trait
-                            // exists `in` and `name` are required attributes of the trait, `scheme` is optional.
-                            put("in", s.expectTrait(HttpApiKeyAuthTrait.class).getIn().toString());
-                            put("name", s.expectTrait(HttpApiKeyAuthTrait.class).getName());
-                            s.expectTrait(HttpApiKeyAuthTrait.class).getScheme().ifPresent(scheme ->
-                                    put("scheme", scheme));
-                    }})
-                    .operationPredicate((m, s, o) -> ServiceIndex.of(m).getEffectiveAuthSchemes(s, o)
-                            .keySet()
-                            .contains(HttpApiKeyAuthTrait.ID)
-                            && !o.hasTrait(OptionalAuthTrait.class))
-                    .build()
+                .pluginFunction(
+                    Symbol.builder()
+                        .namespace(
+                            "./" + CodegenUtils.SOURCE_FOLDER + "/middleware/" + INTEGRATION_NAME,
+                            "/"
+                        )
+                        .name("getHttpApiKeyAuthPlugin")
+                        .build()
+                )
+                .additionalPluginFunctionParamsSupplier((m, s, o) -> new HashMap<String, Object>() {
+                    {
+                        // It's safe to do expectTrait() because the operation predicate ensures that the trait
+                        // exists `in` and `name` are required attributes of the trait, `scheme` is optional.
+                        put("in", s.expectTrait(HttpApiKeyAuthTrait.class).getIn().toString());
+                        put("name", s.expectTrait(HttpApiKeyAuthTrait.class).getName());
+                        s
+                            .expectTrait(HttpApiKeyAuthTrait.class)
+                            .getScheme()
+                            .ifPresent(scheme -> put("scheme", scheme));
+                    }
+                })
+                .operationPredicate((m, s, o) -> hasEffectiveHttpApiKeyAuthTrait(m, s, o))
+                .build()
         );
     }
 
@@ -126,40 +144,24 @@ public final class AddHttpApiKeyAuthPlugin implements TypeScriptIntegration {
             return;
         }
 
-        String noTouchNoticePrefix = "// Please do not touch this file. It's generated from a template in:\n"
-                + "// https://github.com/awslabs/smithy-typescript/blob/main/smithy-typescript-codegen/"
-                + "src/main/resources/software/amazon/smithy/aws/typescript/codegen/integration/";
+        String noTouchNoticePrefix =
+            "// Please do not touch this file. It's generated from a template in:\n" +
+                "// https://github.com/smithy-lang/smithy-typescript/blob/main/smithy-typescript-codegen/" +
+                "src/main/resources/software/amazon/smithy/aws/typescript/codegen/integration/";
 
         // Write the middleware source.
         writerFactory.accept(
-                Paths.get(CodegenUtils.SOURCE_FOLDER, "middleware", INTEGRATION_NAME, "index.ts").toString(),
-                writer -> {
-                        String source = IoUtils.readUtf8Resource(getClass(), "http-api-key-auth.ts");
-                        writer.write("$L$L", noTouchNoticePrefix, "http-api-key-auth.ts");
-                        writer.write("$L", source);
-                });
-
-        // Write the middleware tests.
-        writerFactory.accept(
-                Paths.get(CodegenUtils.SOURCE_FOLDER, "middleware", INTEGRATION_NAME, "index.spec.ts").toString(),
-                writer -> {
-                        writer.addDependency(SymbolDependency.builder()
-                                .dependencyType("devDependencies")
-                                .packageName("@types/jest")
-                                .version("latest")
-                                .build());
-
-                        String source = IoUtils.readUtf8Resource(getClass(), "http-api-key-auth.spec.ts");
-                        writer.write("$L$L", noTouchNoticePrefix, "http-api-key-auth.spec.ts");
-                        writer.write("$L", source);
-                });
+            Paths.get(CodegenUtils.SOURCE_FOLDER, "middleware", INTEGRATION_NAME, "index.ts").toString(),
+            writer -> {
+                writer.addDependency(TypeScriptDependency.SMITHY_CORE);
+                String source = IoUtils.readUtf8Resource(getClass(), "http-api-key-auth.ts");
+                writer.write("$L$L", noTouchNoticePrefix, "http-api-key-auth.ts");
+                writer.write("$L", source);
+            }
+        );
     }
 
-    private void writeAdditionalExports(
-            TypeScriptSettings settings,
-            Model model,
-            TypeScriptWriter writer
-    ) {
+    private void writeAdditionalExports(TypeScriptSettings settings, Model model, TypeScriptWriter writer) {
         boolean isClientSdk = settings.generateClient();
         ServiceShape service = settings.getService(model);
         if (isClientSdk && hasEffectiveHttpApiKeyAuthTrait(model, service)) {
@@ -167,28 +169,29 @@ public final class AddHttpApiKeyAuthPlugin implements TypeScriptIntegration {
         }
     }
 
-    // The service has the effective trait if it's in the "effective auth schemes" response
-    // AND if not all of the operations have the optional auth trait.
+    // If no operations use it, then the service doesn't use it
     private static boolean hasEffectiveHttpApiKeyAuthTrait(Model model, ServiceShape service) {
-        return ServiceIndex.of(model).getEffectiveAuthSchemes(service)
-                .keySet()
-                .contains(HttpApiKeyAuthTrait.ID)
-                && !areAllOptionalAuthOperations(model, service);
-    }
-
-
-    // This is derived from https://github.com/aws/aws-sdk-js-v3/blob/main/codegen/smithy-aws-typescript-codegen/src/main/java/software/amazon/smithy/aws/typescript/codegen/AddAwsAuthPlugin.java.
-    private static boolean areAllOptionalAuthOperations(Model model, ServiceShape service) {
+        ServiceIndex serviceIndex = ServiceIndex.of(model);
         TopDownIndex topDownIndex = TopDownIndex.of(model);
-        Set<OperationShape> operations = topDownIndex.getContainedOperations(service);
-        ServiceIndex index = ServiceIndex.of(model);
-
-        for (OperationShape operation : operations) {
-            if (index.getEffectiveAuthSchemes(service, operation).isEmpty()
-                    || !operation.hasTrait(OptionalAuthTrait.class)) {
-                return false;
+        for (OperationShape operation : topDownIndex.getContainedOperations(service)) {
+            if (operation.hasTrait(OptionalAuthTrait.ID)) {
+                continue;
+            }
+            if (serviceIndex.getEffectiveAuthSchemes(service, operation).containsKey(HttpApiKeyAuthTrait.ID)) {
+                return true;
             }
         }
-        return true;
+        return false;
+    }
+
+    private static boolean hasEffectiveHttpApiKeyAuthTrait(
+        Model model,
+        ServiceShape service,
+        OperationShape operation
+    ) {
+        if (operation.hasTrait(OptionalAuthTrait.class)) {
+            return false;
+        }
+        return ServiceIndex.of(model).getEffectiveAuthSchemes(service, operation).containsKey(HttpApiKeyAuthTrait.ID);
     }
 }

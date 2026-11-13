@@ -1,0 +1,13 @@
+{
+  "compilerOptions": {
+    "noEmit": true,
+    "noCheck": false,
+    "skipLibCheck": true,
+    "types": ["node"],
+    "module": "esnext",
+    "moduleResolution": "bundler"
+  },
+  "extends": "./tsconfig.types.json",
+  "include": ["packages/**/*.spec.ts", "private/**/*.spec.ts"],
+  "exclude": ["node_modules/", "node_modules", "vitest.*.ts"]
+}

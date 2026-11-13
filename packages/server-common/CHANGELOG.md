@@ -1,0 +1,155 @@
+# Changelog
+
+## 0.6.0
+
+### Minor Changes
+
+- a90c7be: Add Smithy RPC v2 JSON protocol support: client protocol and JSON codec in @smithy/core, server protocol in @smithy/server-common, and the snapshot response serializer in @smithy/snapshot-testing.
+- a90c7be: Add SmithyRpcV2JsonServerProtocol, the server (SSDK) implementation of the Smithy RPC v2 JSON protocol.
+
+### Patch Changes
+
+- a90c7be: Tighten SmithyRpcV2JsonServerProtocol request claiming to require the POST method and an RPC v2 route-shaped path, per the Smithy RPC v2 specification, so a GET or an unrelated path is no longer claimed.
+- a90c7be: Resolve the concrete modeled error schema in SmithyRpcV2JsonServerProtocol.serializeError. The lookup now matches the thrown error's own class first (walking up the prototype chain only if it is not registered) instead of any registered ancestor, so a registered base service exception can no longer be selected for a subclass. The __type, serialized members, and @httpError status all come from the concrete schema.
+- a90c7be: Serialize RPC v2 JSON operation errors through the modeled error schema. This emits the error's absolute Shape ID as `__type` (fixing the wrong namespace for errors modeled outside the service's default namespace) and encodes members according to their modeled types (fixing lost type information for members such as bigInteger/bigDecimal). Unmodeled errors keep the previous document-based fallback.
+- a90c7be: Honor the modeled @httpError trait when resolving the status code for RPC v2 JSON error responses. serializeError now delegates to the shared resolveErrorStatusCode helper (explicit runtime status, then @httpError, then the fault default) instead of only checking runtime status and falling back to 400/500, so a modeled @httpError value is applied even when the runtime error carries no status.
+- a90c7be: Match the full RPC v2 JSON route in SmithyRpcV2JsonServerProtocol. The protocol now accepts an optional serviceName and verifies the request path's {serviceName} segment against it, and the route regex is anchored so paths for a different service or with trailing segments after the operation no longer match. Generated schema servers pass the modeled service name; when serviceName is omitted the service-name check is skipped (backward compatible).
+- a90c7be: Return an empty body and no Content-Type for RPC v2 JSON operations whose output targets the Unit shape, per the specification, instead of an empty JSON object with a Content-Type.
+- Updated dependencies [a90c7be]
+- Updated dependencies [a90c7be]
+- Updated dependencies [a90c7be]
+  - @smithy/core@3.37.0
+
+## 0.5.0
+
+### Minor Changes
+
+- 1287f77: Add framework-owned request state and constructor configuration for schema service handlers while preserving legacy server runtime contracts.
+- ad1c37c: Add protocol-owned request claiming and operation routing for schema servers.
+
+### Patch Changes
+
+- ad1c37c: Resolve schema-server response status codes from modeled httpError traits.
+- Updated dependencies [22b8a6e]
+  - @smithy/core@3.36.0
+
+## 0.4.3
+
+### Patch Changes
+
+- 4734e1c: fix for SDK ServiceException instanceof detection relating to mangled class names
+- Updated dependencies [4734e1c]
+- Updated dependencies [4f51625]
+  - @smithy/core@3.35.1
+
+## 0.4.2
+
+### Patch Changes
+
+- a825452: switch for-in loops to guarded
+- Updated dependencies [e82a22b]
+- Updated dependencies [a825452]
+  - @smithy/core@3.33.3
+
+## 0.4.1
+
+### Patch Changes
+
+- 99c3f91: Restore npm provenance attestations. No functional changes.
+- Updated dependencies [99c3f91]
+  - @smithy/core@3.33.2
+  - @smithy/types@4.17.2
+
+## 0.4.0
+
+### Minor Changes
+
+- b3958ad: event stream support for schema-based server SDK
+
+### Patch Changes
+
+- d774f8d: chore: build packages with typescript 7. Packages continue to be compatible with TypeScript 3.4 through 7.0 in consumer applications.
+- Updated dependencies [b3958ad]
+- Updated dependencies [d774f8d]
+  - @smithy/core@3.33.1
+  - @smithy/types@4.17.1
+
+## 0.3.1
+
+### Patch Changes
+
+- 27295ea: update readmes for server packages
+
+## 0.3.0
+
+### Minor Changes
+
+- ec9b4b2: chore: update builds to use typescript 6. This should not affect consumers, who may continue to use TypeScript 3.4 through 7.0 as of this version.
+
+### Patch Changes
+
+- Updated dependencies [ec9b4b2]
+  - @smithy/types@4.17.0
+  - @smithy/core@3.32.0
+
+## 0.2.0
+
+### Minor Changes
+
+- 008d164: add additional protocol options to schema-based server handler
+- 761267d: update ServerProtocol interfaces
+- e3172c6: chore to bring @smithy/server-\* packages into repo standards
+- bb4c289: make SchemaServiceHandler directly instantiable without a generated extending class
+
+## 0.1.6
+
+### Patch Changes
+
+- Updated dependencies [fcf1366]
+  - @smithy/core@3.31.1
+  - @smithy/protocol-http@5.5.16
+
+## 0.1.5
+
+### Patch Changes
+
+- Updated dependencies [a14bb71]
+  - @smithy/core@3.31.0
+  - @smithy/protocol-http@5.5.15
+
+## 0.1.4
+
+### Patch Changes
+
+- Updated dependencies [54040ef]
+- Updated dependencies [155bb56]
+  - @smithy/core@3.30.0
+  - @smithy/protocol-http@5.5.14
+
+## 0.1.3
+
+### Patch Changes
+
+- Updated dependencies [d6e6f8b]
+  - @smithy/core@3.29.8
+  - @smithy/protocol-http@5.5.13
+
+## 0.1.2
+
+### Patch Changes
+
+- Updated dependencies [44b21e6]
+  - @smithy/core@3.29.7
+  - @smithy/protocol-http@5.5.12
+
+## 0.1.1
+
+### Patch Changes
+
+- 3c08e0b: Publish server packages through changesets
+
+## 0.1.0 (2026-07-20)
+
+### Features
+
+- Renamed package from `@aws-smithy/server-common` to `@smithy/server-common`. ([#2156](https://github.com/smithy-lang/smithy-typescript/pull/2156))

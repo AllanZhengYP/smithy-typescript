@@ -1,21 +1,13 @@
 /*
- * Copyright 2020 Amazon.com, Inc. or its affiliates. All Rights Reserved.
- *
- * Licensed under the Apache License, Version 2.0 (the "License").
- * You may not use this file except in compliance with the License.
- * A copy of the License is located at
- *
- *  http://aws.amazon.com/apache2.0
- *
- * or in the "license" file accompanying this file. This file is distributed
- * on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either
- * express or implied. See the License for the specific language governing
- * permissions and limitations under the License.
+ * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
  */
-
 package software.amazon.smithy.typescript.codegen;
 
 import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
 import software.amazon.smithy.codegen.core.CodegenException;
 import software.amazon.smithy.jmespath.ExpressionVisitor;
 import software.amazon.smithy.jmespath.JmespathExpression;
@@ -60,7 +52,7 @@ class TypeScriptJmesPathVisitor implements ExpressionVisitor<Void> {
     }
 
     public void run() {
-        writer.openBlock("let returnComparator = () => {", "}", () -> {
+        writer.openBlock("const returnComparator = () => {", "}", () -> {
             executionContext = accessor;
             jmesExpression.accept(this);
             writer.write("return $L;", executionContext);
@@ -68,47 +60,8 @@ class TypeScriptJmesPathVisitor implements ExpressionVisitor<Void> {
         executionContext = "returnComparator()";
     }
 
-    private String makeNewScope(String prefix) {
-        scopeCount += 1;
-        return prefix + scopeCount;
-    }
-
-    void writeBooleanExpectation(String expectedValue, String returnValue) {
-        writer.openBlock("if ($L == $L) {", "}", executionContext, expectedValue, () -> {
-            writer.write("return $L;", returnValue);
-        });
-    }
-
-    void writeAnyStringEqualsExpectation(String expectedValue, String returnValue) {
-        String element = makeNewScope("anyStringEq_");
-        writer.openBlock("for (let $L of $L) {", "}", element, executionContext, () -> {
-            writer.openBlock("if ($L == $S) {", "}", element, expectedValue, () -> {
-                writer.write("return $L;", returnValue);
-            });
-        });
-    }
-
-    void writeAllStringEqualsExpectation(String expectedValue, String returnValue) {
-        String element = makeNewScope("element_");
-        String result = makeNewScope("allStringEq_");
-        writer.write("let $L = ($L.length > 0);", result, executionContext);
-        writer.openBlock("for (let $L of $L) {", "}", element, executionContext, () -> {
-            writer.write("$L = $L && ($L == $S)", result, result, element, expectedValue);
-        });
-        writer.openBlock("if ($L) {", "}", result, () -> {
-            writer.write("return $L;", returnValue);
-        });
-    }
-
-    void writeStringExpectation(String expectedValue, String returnValue) {
-        writer.openBlock("if ($L === $S) {", "}", executionContext, expectedValue, () -> {
-            writer.write("return $L;", returnValue);
-        });
-    }
-
     @Override
     public Void visitComparator(ComparatorExpression expression) {
-
         String executionContextInital = executionContext;
         String comparator = expression.getComparator().toString();
 
@@ -160,8 +113,9 @@ class TypeScriptJmesPathVisitor implements ExpressionVisitor<Void> {
                     this.executionContext = orginalExecutionContext;
                     break;
                 default:
-                    throw new CodegenException("TypeScriptJmesPath visitor has not implemented function: "
-                            + expression.getName());
+                    throw new CodegenException(
+                        "TypeScriptJmesPath visitor has not implemented function: " + expression.getName()
+                    );
             }
         });
 
@@ -196,10 +150,11 @@ class TypeScriptJmesPathVisitor implements ExpressionVisitor<Void> {
                 executionContext = "\"" + expression.getValue().toString() + "\"";
                 break;
             case OBJECT:
+                executionContext = serializeObject(expression.expectObjectValue());
+                break;
             case ARRAY:
-                // TODO: resolve JMESPATH OBJECTS and ARRAY types as literals
-                throw new CodegenException("TypeScriptJmesPath visitor has not implemented resolution of ARRAY and"
-                        + " OBJECT literials ");
+                executionContext = serializeArray(expression.expectArrayValue());
+                break;
             default:
                 // All other options are already valid js literials.
                 // (BOOLEAN, ANY, NULL, NUMBER, EXPRESSION)
@@ -215,11 +170,13 @@ class TypeScriptJmesPathVisitor implements ExpressionVisitor<Void> {
 
         String executionContextInital = executionContext;
 
-        expression.getExpressions().forEach((JmespathExpression exp) -> {
-            exp.accept(this);
-            evaluators.add(executionContext);
-            executionContext = executionContextInital;
-        });
+        expression
+            .getExpressions()
+            .forEach((JmespathExpression exp) -> {
+                exp.accept(this);
+                evaluators.add(executionContext);
+                executionContext = executionContextInital;
+            });
 
         String resultScope = makeNewScope("result_");
         writer.write("let $L = [];", resultScope);
@@ -262,8 +219,13 @@ class TypeScriptJmesPathVisitor implements ExpressionVisitor<Void> {
         expression.getRight().accept(this);
         String rightContext = executionContext;
 
-        executionContext = String.format("((%s || %s) && (%s || %s)) ", leftContext, rightContext, rightContext,
-                leftContext);
+        executionContext = String.format(
+            "((%s || %s) && (%s || %s)) ",
+            leftContext,
+            rightContext,
+            rightContext,
+            leftContext
+        );
 
         return null;
     }
@@ -281,12 +243,18 @@ class TypeScriptJmesPathVisitor implements ExpressionVisitor<Void> {
 
         String element = makeNewScope("element_");
         String result = makeNewScope("objectProjection_");
-        writer.openBlock("let $L = Object.values($L).map(($L: any) => {", "});", result,
-                executionContext, element, () -> {
-            executionContext = element;
-            expression.getRight().accept(this);
-            writer.write("return $L;", executionContext);
-        });
+        writer.openBlock(
+            "let $L = Object.values($L).map(($L: any) => {",
+            "});",
+            result,
+            executionContext,
+            element,
+            () -> {
+                executionContext = element;
+                expression.getRight().accept(this);
+                writer.write("return $L;", executionContext);
+            }
+        );
         executionContext = result;
         return null;
     }
@@ -298,12 +266,11 @@ class TypeScriptJmesPathVisitor implements ExpressionVisitor<Void> {
         if (!(expression.getRight() instanceof CurrentExpression)) {
             String element = makeNewScope("element_");
             String result = makeNewScope("projection_");
-            writer.openBlock("let $L = $L.map(($L: any) => {", "});", result,
-                    executionContext, element, () -> {
-                        executionContext = element;
-                        expression.getRight().accept(this);
-                        writer.write("return $L;", executionContext);
-                    });
+            writer.openBlock("let $L = $L.map(($L: any) => {", "});", result, executionContext, element, () -> {
+                executionContext = element;
+                expression.getRight().accept(this);
+                writer.write("return $L;", executionContext);
+            });
             executionContext = result;
         }
         return null;
@@ -311,19 +278,24 @@ class TypeScriptJmesPathVisitor implements ExpressionVisitor<Void> {
 
     @Override
     public Void visitFilterProjection(FilterProjectionExpression expression) {
-
         expression.getLeft().accept(this);
 
         expression.getRight().accept(this);
 
         String elementScope = makeNewScope("element_");
         String resultScope = makeNewScope("filterRes_");
-        writer.openBlock("let $L = $L.filter(($L: any) => {", "});", resultScope,
-                executionContext, elementScope, () -> {
-            executionContext = elementScope;
-            expression.getComparison().accept(this);
-            writer.write("return $L;", executionContext);
-        });
+        writer.openBlock(
+            "let $L = $L.filter(($L: any) => {",
+            "});",
+            resultScope,
+            executionContext,
+            elementScope,
+            () -> {
+                executionContext = elementScope;
+                expression.getComparison().accept(this);
+                writer.write("return $L;", executionContext);
+            }
+        );
 
         executionContext = resultScope;
         return null;
@@ -339,5 +311,74 @@ class TypeScriptJmesPathVisitor implements ExpressionVisitor<Void> {
         expression.getLeft().accept(this);
         expression.getRight().accept(this);
         return null;
+    }
+
+    void writeBooleanExpectation(String expectedValue, String returnValue) {
+        writer.openBlock("if ($L == $L) {", "}", executionContext, expectedValue, () -> {
+            writer.write("return $L;", returnValue);
+        });
+    }
+
+    void writeAnyStringEqualsExpectation(String expectedValue, String returnValue) {
+        String element = makeNewScope("anyStringEq_");
+        writer.openBlock("for (let $L of $L) {", "}", element, executionContext, () -> {
+            writer.openBlock("if ($L == $S) {", "}", element, expectedValue, () -> {
+                writer.write("return $L;", returnValue);
+            });
+        });
+    }
+
+    void writeAllStringEqualsExpectation(String expectedValue, String returnValue) {
+        String element = makeNewScope("element_");
+        String result = makeNewScope("allStringEq_");
+        writer.write("let $L = ($L.length > 0);", result, executionContext);
+        writer.openBlock("for (let $L of $L) {", "}", element, executionContext, () -> {
+            writer.write("$L = $L && ($L == $S)", result, result, element, expectedValue);
+        });
+        writer.openBlock("if ($L) {", "}", result, () -> {
+            writer.write("return $L;", returnValue);
+        });
+    }
+
+    void writeStringExpectation(String expectedValue, String returnValue) {
+        writer.openBlock("if ($L === $S) {", "}", executionContext, expectedValue, () -> {
+            writer.write("return $L;", returnValue);
+        });
+    }
+
+    private String makeNewScope(String prefix) {
+        scopeCount += 1;
+        return prefix + scopeCount;
+    }
+
+    private String serializeObject(Map<String, Object> obj) {
+        return ("{" +
+            obj
+                .entrySet()
+                .stream()
+                .map(entry -> "\"" + entry.getKey() + "\":" + serializeValue(entry.getValue()))
+                .collect(Collectors.joining(","))
+            +
+            "}");
+    }
+
+    private String serializeArray(List<Object> array) {
+        return "[" + array.stream().map(this::serializeValue).collect(Collectors.joining(",")) + "]";
+    }
+
+    @SuppressWarnings("unchecked")
+    private String serializeValue(Object value) {
+        if (value == null) {
+            return "null";
+        } else if (value instanceof String) {
+            return "\"" + value + "\"";
+        } else if (value instanceof Number || value instanceof Boolean) {
+            return value.toString();
+        } else if (value instanceof Map) {
+            return serializeObject((Map<String, Object>) value);
+        } else if (value instanceof ArrayList) {
+            return serializeArray((List<Object>) value);
+        }
+        throw new CodegenException("Unsupported literal type: " + value.getClass());
     }
 }

@@ -1,0 +1,161 @@
+.PHONY: build build-packages sync api-snapshot ct cti cwt cwti dist lint format test-typescript-versions test-e2e
+
+build:
+	./gradlew clean build publishToMavenLocal
+
+dist:
+	node scripts/compilation/build-es-cjs-batch.js --all
+
+# @smithy/undici-http-handler depends on undici@7, which requires Node.js >= 20.
+# Skip building it on older Node versions so the rest of the workspace still builds.
+build-packages:
+	@NODE_MAJOR=$$(node -p "parseInt(process.versions.node.split('.')[0], 10)"); \
+	if [ "$$NODE_MAJOR" -lt 20 ]; then \
+		yarn turbo run build --filter='!@smithy/undici-http-handler'; \
+	else \
+		yarn turbo run build; \
+	fi
+
+sync:
+	gh repo sync $$GITHUB_USERNAME/smithy-typescript -b main
+	git fetch --all
+
+generate-protocol-tests:
+	rm -rf ./smithy-typescript-protocol-test-codegen/build/smithyprojections/smithy-typescript-protocol-test-codegen
+	./gradlew :smithy-typescript-protocol-test-codegen:build
+	rm -rf ./private/smithy-rpcv2-cbor
+	rm -rf ./private/smithy-rpcv2-cbor-schema
+	rm -rf ./private/smithy-rpcv2-json-schema
+	rm -rf ./private/my-local-model
+	rm -rf ./private/my-local-model-schema
+	rm -rf ./private/my-local-model-schema-json
+	rm -rf ./private/my-local-model-schema-server
+	rm -rf ./private/types-only
+	cp -r ./smithy-typescript-protocol-test-codegen/build/smithyprojections/smithy-typescript-protocol-test-codegen/smithy-rpcv2-cbor/typescript-codegen ./private/smithy-rpcv2-cbor
+	cp -r ./smithy-typescript-protocol-test-codegen/build/smithyprojections/smithy-typescript-protocol-test-codegen/smithy-rpcv2-cbor-schema/typescript-codegen ./private/smithy-rpcv2-cbor-schema
+	cp -r ./smithy-typescript-protocol-test-codegen/build/smithyprojections/smithy-typescript-protocol-test-codegen/smithy-rpcv2-json-schema/typescript-codegen ./private/smithy-rpcv2-json-schema
+	cp -r ./smithy-typescript-protocol-test-codegen/build/smithyprojections/smithy-typescript-protocol-test-codegen/my-local-model/typescript-client-codegen/ ./private/my-local-model
+	cp -r ./smithy-typescript-protocol-test-codegen/build/smithyprojections/smithy-typescript-protocol-test-codegen/my-local-model-schema/typescript-client-codegen/ ./private/my-local-model-schema
+	cp -r ./smithy-typescript-protocol-test-codegen/build/smithyprojections/smithy-typescript-protocol-test-codegen/my-local-model-schema-json/typescript-client-codegen/ ./private/my-local-model-schema-json
+	cp -r ./smithy-typescript-protocol-test-codegen/build/smithyprojections/smithy-typescript-protocol-test-codegen/my-local-model-schema-server/typescript-server-codegen/ ./private/my-local-model-schema-server
+	cp -r ./smithy-typescript-protocol-test-codegen/build/smithyprojections/smithy-typescript-protocol-test-codegen/types-only/typescript-codegen/ ./private/types-only
+	node ./scripts/post-protocol-test-codegen
+	yarn
+	yarn turbo run build -F="./private/*" --only
+	make generate-server-tests
+	make test-protocols;
+
+generate-server-tests:
+	rm -rf ./smithy-typescript-codegen-test/build/smithyprojections/smithy-typescript-codegen-test
+	rm -rf ./smithy-typescript-schema-ssdk-codegen-test/build/smithyprojections/smithy-typescript-schema-ssdk-codegen-test
+	./gradlew :smithy-typescript-codegen-test:build :smithy-typescript-schema-ssdk-codegen-test:build
+	rm -rf ./private/interceptor-example-ssdk
+	cp -r ./smithy-typescript-codegen-test/build/smithyprojections/smithy-typescript-codegen-test/interceptor-example/typescript-server-codegen/ ./private/interceptor-example-ssdk
+	rm -rf ./private/interceptor-example-schema-ssdk
+	cp -r ./smithy-typescript-schema-ssdk-codegen-test/build/smithyprojections/smithy-typescript-schema-ssdk-codegen-test/interceptor-example/typescript-schema-ssdk-codegen/ ./private/interceptor-example-schema-ssdk
+	node ./scripts/post-protocol-test-codegen
+	yarn
+	yarn turbo run build -F="./private/interceptor-example-ssdk" -F="./private/interceptor-example-schema-ssdk"
+
+test-protocols:
+	(cd ./private/smithy-rpcv2-cbor && npx vitest run --globals && yarn test:index)
+	(cd ./private/smithy-rpcv2-cbor-schema && npx vitest run --globals && yarn test:index)
+	(cd ./private/smithy-rpcv2-json-schema && npx vitest run --globals && yarn test:index)
+	(cd ./private/my-local-model-schema && npx vitest run --globals && yarn test:index)
+	(cd ./private/my-local-model-schema-json && npx vitest run --globals --passWithNoTests && yarn test:index)
+	(cd ./private/smithy-rpcv2-cbor-schema && yarn test:integration)
+	(cd ./private/smithy-rpcv2-json-schema && yarn test:integration)
+	(cd ./private/my-local-model-schema && yarn test:integration)
+	(cd ./private/my-local-model-schema-json && yarn test:integration)
+
+benchmark:
+	(cd ./private/my-local-model-schema && npx vitest run --globals)
+
+# "build generate test"
+bgt:
+	make build generate-protocol-tests
+
+gt:
+	make generate-protocol-tests
+
+# @smithy/undici-http-handler depends on undici@7, which requires Node.js >= 20.
+# Skip its tests on older Node versions so the rest of the unit tests still run.
+test-unit:
+	@NODE_MAJOR=$$(node -p "parseInt(process.versions.node.split('.')[0], 10)"); \
+	if [ "$$NODE_MAJOR" -lt 20 ]; then \
+		yarn g:vitest run -c vitest.config.mts --exclude '**/packages/undici-http-handler/**'; \
+	else \
+		yarn g:vitest run -c vitest.config.mts; \
+	fi
+
+test-browser:
+	yarn g:vitest run -c vitest.config.browser.mts
+
+test-bundlers:
+	(cd ./testbed/bundlers && make run)
+	(cd ./testbed/bundler-compat && make run)
+
+# typecheck for test code.
+test-types:
+	npx tsc -p tsconfig.test.json
+
+# verify generated clients compile across supported TypeScript versions (see testbed/ts-compat/README.md).
+test-typescript-versions:
+	(cd ./testbed/ts-compat && make run)
+
+test-integration:
+	make static-analysis;
+	make api-snapshot;
+	make test-browser;
+	node ./packages/node-http-handler/test/node-http-handler.interception.mjs
+	@NODE_MAJOR=$$(node -p "parseInt(process.versions.node.split('.')[0], 10)"); \
+	if [ "$$NODE_MAJOR" -lt 20 ]; then \
+		yarn g:vitest run -c vitest.config.integ.mts --exclude '**/packages/undici-http-handler/**'; \
+	else \
+		yarn g:vitest run -c vitest.config.integ.mts; \
+	fi
+	make test-types;
+	make test-typescript-versions;
+	make test-bundlers;
+
+static-analysis:
+	node ./scripts/validation/generic-byte-array.js;
+	node ./scripts/check-dependencies.js;
+	node ./scripts/runtime-dep-version-check.js;
+	node ./scripts/validation/validate-all.js;
+
+turbo-clean:
+	@read -p "Are you sure you want to delete your local cache? [y/N]: " ans && [ $${ans:-N} = y ]
+	@echo "\nDeleted cache folders: \n--------"
+	@find . -name '.turbo' -type d -prune -print -exec rm -rf '{}' + && echo '\n'
+
+api-snapshot:
+	node scripts/validation/api-snapshot.js --write
+	git diff --exit-code api-snapshot/
+
+S ?= $(word 2,$(MAKECMDGOALS))
+
+# make ct retry, for example, to run a subset of core unit tests.
+ct:
+	cd packages/core && yarn g:vitest run src/submodules/$(S)
+cwt:
+	cd packages/core && yarn g:vitest watch src/submodules/$(S)
+
+# same as ct, but for integration tests.
+cti:
+	cd packages/core && yarn g:vitest run -c vitest.config.integ.mts src/submodules/$(S)
+cwti:
+	cd packages/core && yarn g:vitest watch -c vitest.config.integ.mts src/submodules/$(S)
+
+# swallow extra positional args (e.g. make ct endpoints)
+%:
+	@:
+
+lint:
+	npx oxlint -c .oxlintrc.json --fix packages scripts
+
+format:
+	npx oxfmt packages scripts testbed
+
+test-e2e:
+	(cd ./testbed/aws/s3 && make run)

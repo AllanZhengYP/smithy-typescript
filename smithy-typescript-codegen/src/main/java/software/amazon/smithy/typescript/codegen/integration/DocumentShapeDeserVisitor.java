@@ -1,18 +1,7 @@
 /*
- * Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
- *
- * Licensed under the Apache License, Version 2.0 (the "License").
- * You may not use this file except in compliance with the License.
- * A copy of the License is located at
- *
- *  http://aws.amazon.com/apache2.0
- *
- * or in the "license" file accompanying this file. This file is distributed
- * on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either
- * express or implied. See the License for the specific language governing
- * permissions and limitations under the License.
+ * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
  */
-
 package software.amazon.smithy.typescript.codegen.integration;
 
 import java.util.Set;
@@ -34,6 +23,7 @@ import software.amazon.smithy.model.shapes.StructureShape;
 import software.amazon.smithy.model.shapes.UnionShape;
 import software.amazon.smithy.typescript.codegen.TypeScriptWriter;
 import software.amazon.smithy.typescript.codegen.integration.ProtocolGenerator.GenerationContext;
+import software.amazon.smithy.typescript.codegen.knowledge.SerdeElisionIndex;
 import software.amazon.smithy.utils.SmithyUnstableApi;
 
 /**
@@ -65,10 +55,13 @@ import software.amazon.smithy.utils.SmithyUnstableApi;
  */
 @SmithyUnstableApi
 public abstract class DocumentShapeDeserVisitor extends ShapeVisitor.Default<Void> {
+
+    protected boolean serdeElisionEnabled;
     private final GenerationContext context;
 
     public DocumentShapeDeserVisitor(GenerationContext context) {
         this.context = context;
+        this.serdeElisionEnabled = false;
     }
 
     /**
@@ -292,23 +285,31 @@ public abstract class DocumentShapeDeserVisitor extends ShapeVisitor.Default<Voi
      * @param functionBody An implementation that will generate a function body to
      *                     serialize the shape.
      */
-    protected final void generateDeserFunction(
-            Shape shape,
-            BiConsumer<GenerationContext, Shape> functionBody
-    ) {
+    protected final void generateDeserFunction(Shape shape, BiConsumer<GenerationContext, Shape> functionBody) {
         SymbolProvider symbolProvider = context.getSymbolProvider();
         TypeScriptWriter writer = context.getWriter();
 
         Symbol symbol = symbolProvider.toSymbol(shape);
         // Use the shape name for the function name.
-        String methodName = ProtocolGenerator.getDeserFunctionName(symbol, context.getProtocolName());
+        String methodName = ProtocolGenerator.getDeserFunctionShortName(symbol);
+        String methodLongName = ProtocolGenerator.getDeserFunctionName(symbol, context.getProtocolName());
 
-        writer.addImport(symbol, symbol.getName());
-        writer.openBlock("const $L = (\n"
-                       + "  output: any,\n"
-                       + "  context: __SerdeContext\n"
-                       + "): $T => {", "}", methodName, symbol, () -> functionBody.accept(context, shape));
-        writer.write("");
+        boolean mayElide = serdeElisionEnabled && SerdeElisionIndex.of(context.getModel()).mayElide(shape);
+        if (mayElide) {
+            writer.write("// " + methodName + " omitted.");
+            writer.write("");
+        } else {
+            writer.addImport(symbol, symbol.getName());
+            writer.writeDocs(methodLongName);
+            writer.openBlock(
+                "const $L = (\n" + "  output: any,\n" + "  context: __SerdeContext\n" + "): $T => {",
+                "}",
+                methodName,
+                symbol,
+                () -> functionBody.accept(context, shape)
+            );
+            writer.write("");
+        }
     }
 
     @Override

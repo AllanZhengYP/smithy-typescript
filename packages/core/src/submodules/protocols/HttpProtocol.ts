@@ -1,0 +1,379 @@
+import { hasOwn, HttpRequest, HttpResponse, isValidHostname } from "@smithy/core/transport";
+import type { EventStreamSerde } from "@smithy/core/event-streams";
+import { type NormalizedSchema, TypeRegistry } from "@smithy/core/schema";
+import type {
+  ClientProtocol,
+  Codec,
+  Endpoint,
+  EndpointBearer,
+  EndpointV2,
+  EventStreamMarshaller,
+  EventStreamSerdeContext,
+  EventStreamSerdeProvider,
+  HandlerExecutionContext,
+  HttpRequest as IHttpRequest,
+  HttpResponse as IHttpResponse,
+  MetadataBearer,
+  OperationSchema,
+  ResponseMetadata,
+  Schema,
+  SerdeFunctions,
+  ShapeDeserializer,
+  ShapeSerializer,
+  StaticErrorSchema,
+} from "@smithy/types";
+
+import { SerdeContext } from "./SerdeContext";
+import { getHttpOperationBindings, HttpBindingNormalizedSchema } from "./HttpBindingNormalizedSchema";
+
+/**
+ * Abstract base for HTTP-based client protocols.
+ *
+ * @public
+ */
+export abstract class HttpProtocol extends SerdeContext implements ClientProtocol<IHttpRequest, IHttpResponse> {
+  /**
+   * An error registry having the namespace of the modeled service,
+   * but combining all error schemas found within the service closure.
+   *
+   * Used to look up error schema during deserialization.
+   */
+  protected compositeErrorRegistry: TypeRegistry;
+  protected abstract serializer: ShapeSerializer<string | Uint8Array>;
+  protected abstract deserializer: ShapeDeserializer<string | Uint8Array>;
+
+  /**
+   * @param options.defaultNamespace - used by various implementing classes.
+   * @param options.errorTypeRegistries - registry instances that contribute to error deserialization.
+   */
+  protected constructor(
+    public readonly options: {
+      defaultNamespace: string;
+      errorTypeRegistries?: TypeRegistry[];
+    }
+  ) {
+    super();
+    this.compositeErrorRegistry = new TypeRegistry(options.defaultNamespace);
+    for (const etr of options.errorTypeRegistries ?? []) {
+      this.compositeErrorRegistry.copyFrom(etr);
+    }
+  }
+
+  public abstract getShapeId(): string;
+
+  public abstract getPayloadCodec(): Codec<any, any>;
+
+  public getRequestType(): new (...args: any[]) => IHttpRequest {
+    return HttpRequest;
+  }
+
+  public getResponseType(): new (...args: any[]) => IHttpResponse {
+    return HttpResponse;
+  }
+
+  /**
+   * @override
+   */
+  public setSerdeContext(serdeContext: SerdeFunctions): void {
+    this.serdeContext = serdeContext;
+    this.serializer.setSerdeContext(serdeContext);
+    this.deserializer.setSerdeContext(serdeContext);
+    if (this.getPayloadCodec()) {
+      this.getPayloadCodec().setSerdeContext(serdeContext);
+    }
+  }
+
+  public abstract serializeRequest<Input extends object>(
+    operationSchema: OperationSchema,
+    input: Input,
+    context: HandlerExecutionContext & SerdeFunctions & EndpointBearer
+  ): Promise<IHttpRequest>;
+
+  public updateServiceEndpoint(request: IHttpRequest, endpoint: EndpointV2 | Endpoint) {
+    if ("url" in endpoint) {
+      request.protocol = endpoint.url.protocol;
+      request.hostname = endpoint.url.hostname;
+      request.port = endpoint.url.port ? Number(endpoint.url.port) : undefined;
+      request.path = endpoint.url.pathname;
+      request.fragment = endpoint.url.hash || void 0;
+      request.username = endpoint.url.username || void 0;
+      request.password = endpoint.url.password || void 0;
+      if (!request.query) {
+        request.query = {};
+      }
+      for (const [k, v] of endpoint.url.searchParams.entries()) {
+        request.query[k] = v;
+      }
+      // Apply resolved endpoint headers per Endpoints 2.0 spec.
+      if (endpoint.headers) {
+        for (const name in endpoint.headers) {
+          if (!hasOwn(endpoint.headers, name)) {
+            continue;
+          }
+          request.headers[name] = endpoint.headers[name].join(", ");
+        }
+      }
+      return request;
+    } else {
+      request.protocol = endpoint.protocol;
+      request.hostname = endpoint.hostname;
+      request.port = endpoint.port ? Number(endpoint.port) : undefined;
+      request.path = endpoint.path;
+      request.query = {
+        ...endpoint.query,
+      };
+      // Apply endpoint headers for deprecated Endpoint type if present
+      if (endpoint.headers) {
+        for (const name in endpoint.headers) {
+          if (!hasOwn(endpoint.headers, name)) {
+            continue;
+          }
+          request.headers[name] = endpoint.headers[name];
+        }
+      }
+      return request;
+    }
+  }
+
+  public abstract deserializeResponse<Output extends MetadataBearer>(
+    operationSchema: OperationSchema,
+    context: HandlerExecutionContext & SerdeFunctions,
+    response: IHttpResponse
+  ): Promise<Output>;
+
+  protected setHostPrefix<Input extends object>(
+    request: IHttpRequest,
+    operationSchema: OperationSchema,
+    input: Input,
+    operation = getHttpOperationBindings(operationSchema)
+  ): void {
+    if (this.serdeContext?.disableHostPrefix) {
+      return;
+    }
+    const hostPrefix = operation[4];
+    if (typeof hostPrefix !== "string") {
+      return;
+    }
+
+    let resolvedHostPrefix = hostPrefix;
+    for (const [name, [, flags]] of HttpBindingNormalizedSchema.of(operationSchema.input).getHttpBindings().request
+      .memberBindings) {
+      if (!((flags >> 17) & 1)) {
+        continue;
+      }
+      const replacement = input[name as keyof typeof input];
+      if (typeof replacement !== "string") {
+        throw new Error(`@smithy/core/schema - ${name} in input must be a string as hostLabel.`);
+      }
+      resolvedHostPrefix = resolvedHostPrefix.replace(`{${name}}`, replacement);
+    }
+    request.hostname = resolvedHostPrefix + request.hostname;
+    if (!isValidHostname(request.hostname)) {
+      throw new Error(`[${request.hostname}] is not a valid hostname.`);
+    }
+  }
+
+  protected abstract handleError(
+    operationSchema: OperationSchema,
+    context: HandlerExecutionContext & SerdeFunctions,
+    response: IHttpResponse,
+    dataObject: any,
+    metadata: ResponseMetadata
+  ): Promise<never>;
+
+  protected deserializeMetadata(output: IHttpResponse): ResponseMetadata {
+    return {
+      httpStatusCode: output.statusCode,
+      requestId:
+        output.headers["x-amzn-requestid"] ?? output.headers["x-amzn-request-id"] ?? output.headers["x-amz-request-id"],
+      extendedRequestId: output.headers["x-amz-id-2"],
+      cfId: output.headers["x-amz-cf-id"],
+    };
+  }
+
+  /**
+   * For a given error short name, a list of preferred namespaces, and a list of preferred registries,
+   * find the error's schema and class.
+   *
+   * @param name - short error shape id.
+   * @param namespaces - must contain '*' to allow matching against an undeclared namespace.
+   * @param registries - in which to look.
+   * @returns matched error schema and constructor, with worst case being the least-descriptive DocumentSchema and native Error.
+   */
+  protected resolveError(
+    name: string,
+    namespaces: string[],
+    registries: TypeRegistry[]
+  ): [StaticErrorSchema, any, "modeled" | "synthetic" | "native"] {
+    const defaultErrorSchema = [-3, "", "Error", 0, [], [], 0] satisfies StaticErrorSchema;
+    let schema: StaticErrorSchema | undefined;
+    for (const registry of registries) {
+      for (const ns of namespaces) {
+        try {
+          if (ns === "*") {
+            schema = registry.getSchema(name) as StaticErrorSchema;
+          } else {
+            schema = registry.getSchema(ns + "#" + name) as StaticErrorSchema;
+          }
+          const errorCtor = registry.getErrorCtor(schema);
+          if (errorCtor) {
+            return [schema, errorCtor, "modeled"];
+          } else {
+            const syntheticErrorSchema = registry.getBaseException();
+            if (syntheticErrorSchema) {
+              const syntheticErrorCtor = registry.getErrorCtor(syntheticErrorSchema);
+              if (syntheticErrorCtor) {
+                return [schema, syntheticErrorCtor, "synthetic"];
+              }
+            }
+          }
+        } catch (ignored) {
+          // schema not found, continue.
+        }
+      }
+    }
+
+    // at this point, no schema was found, so we'll take a preferred registry's
+    // synthetic base error.
+    for (const registry of registries) {
+      const syntheticErrorSchema = registry.getBaseException();
+      if (syntheticErrorSchema) {
+        const syntheticErrorCtor = registry.getErrorCtor(syntheticErrorSchema);
+        if (syntheticErrorCtor) {
+          return [syntheticErrorSchema, syntheticErrorCtor, "synthetic"];
+        }
+      }
+    }
+
+    return [defaultErrorSchema, Error, "native"];
+  }
+
+  /**
+   * @param eventStream - the iterable provided by the caller.
+   * @param requestSchema - the schema of the event stream container (struct).
+   * @param [initialRequest] - only provided if the initial-request is part of the event stream (RPC).
+   *
+   * @returns a stream suitable for the HTTP body of a request.
+   */
+  protected async serializeEventStream({
+    eventStream,
+    requestSchema,
+    initialRequest,
+  }: {
+    eventStream: AsyncIterable<any>;
+    requestSchema: NormalizedSchema;
+    initialRequest?: any;
+  }): Promise<IHttpRequest["body"]> {
+    const eventStreamSerde = await this.loadEventStreamCapability();
+    return eventStreamSerde.serializeEventStream({
+      eventStream,
+      requestSchema,
+      initialRequest,
+    });
+  }
+
+  /**
+   * @param response - http response from which to read the event stream.
+   * @param unionSchema - schema of the event stream container (struct).
+   * @param [initialResponseContainer] - provided and written to only if the initial response is part of the event stream (RPC).
+   *
+   * @returns the asyncIterable of the event stream.
+   */
+  protected async deserializeEventStream({
+    response,
+    responseSchema,
+    initialResponseContainer,
+  }: {
+    response: IHttpResponse;
+    responseSchema: NormalizedSchema;
+    initialResponseContainer?: any;
+  }): Promise<AsyncIterable<{ [key: string]: any; $unknown?: unknown }>> {
+    const eventStreamSerde = await this.loadEventStreamCapability();
+    return eventStreamSerde.deserializeEventStream({
+      response,
+      responseSchema,
+      initialResponseContainer,
+    });
+  }
+
+  /**
+   * Loads eventStream capability async (for chunking).
+   */
+  protected async loadEventStreamCapability(): Promise<EventStreamSerde> {
+    const { EventStreamSerde, eventStreamSerdeProvider } = await import("@smithy/core/event-streams");
+    const marshaller = this.resolveEventStreamMarshaller(eventStreamSerdeProvider);
+    return new EventStreamSerde({
+      marshaller,
+      serializer: this.serializer,
+      deserializer: this.deserializer,
+      serdeContext: this.serdeContext,
+      defaultContentType: this.getDefaultContentType(),
+      compositeErrorRegistry: this.compositeErrorRegistry,
+    });
+  }
+
+  /**
+   * @returns content-type default header value for event stream events and other documents.
+   */
+  protected getDefaultContentType(): string {
+    throw new Error(
+      `@smithy/core/protocols - ${this.constructor.name} getDefaultContentType() implementation missing.`
+    );
+  }
+
+  /**
+   * For HTTP binding protocols, this method is overridden in {@link HttpBindingProtocol}.
+   *
+   * @deprecated only use this for HTTP binding protocols.
+   */
+  protected async deserializeHttpMessage(
+    schema: Schema,
+    context: HandlerExecutionContext & SerdeFunctions,
+    response: IHttpResponse,
+    headerBindings: Set<string>,
+    dataObject: any
+  ): Promise<string[]>;
+  protected async deserializeHttpMessage(
+    schema: Schema,
+    context: HandlerExecutionContext & SerdeFunctions,
+    response: IHttpResponse,
+    dataObject: any
+  ): Promise<string[]>;
+  protected async deserializeHttpMessage(
+    schema: Schema,
+    context: HandlerExecutionContext & SerdeFunctions,
+    response: IHttpResponse,
+    arg4: unknown,
+    arg5?: unknown
+  ): Promise<string[]> {
+    void schema;
+    void context;
+    void response;
+    void arg4;
+    void arg5;
+    // This method is preserved for backwards compatibility.
+    // It should remain unused.
+    return [];
+  }
+
+  protected getEventStreamMarshaller(): EventStreamMarshaller {
+    const context = this.serdeContext as unknown as EventStreamSerdeContext;
+    if (!context.eventStreamMarshaller) {
+      throw new Error("@smithy/core - HttpProtocol: eventStreamMarshaller missing in serdeContext.");
+    }
+    return context.eventStreamMarshaller;
+  }
+
+  /**
+   * Returns a platform-specific EventStreamMarshaller.
+   * Prefers user-injected marshaller from serdeContext (via client config),
+   * falls back to the dynamically imported provider.
+   */
+  private resolveEventStreamMarshaller(importedProvider: EventStreamSerdeProvider): EventStreamMarshaller {
+    const context = this.serdeContext as unknown as EventStreamSerdeContext;
+    if (context.eventStreamMarshaller) {
+      return context.eventStreamMarshaller;
+    }
+    return importedProvider(this.serdeContext as any);
+  }
+}

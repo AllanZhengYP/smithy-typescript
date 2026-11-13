@@ -1,18 +1,7 @@
 /*
- * Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
- *
- * Licensed under the Apache License, Version 2.0 (the "License").
- * You may not use this file except in compliance with the License.
- * A copy of the License is located at
- *
- *  http://aws.amazon.com/apache2.0
- *
- * or in the "license" file accompanying this file. This file is distributed
- * on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either
- * express or implied. See the License for the specific language governing
- * permissions and limitations under the License.
+ * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
  */
-
 package software.amazon.smithy.typescript.codegen.integration;
 
 import java.util.Collections;
@@ -29,6 +18,8 @@ import software.amazon.smithy.typescript.codegen.LanguageTarget;
 import software.amazon.smithy.typescript.codegen.TypeScriptCodegenContext;
 import software.amazon.smithy.typescript.codegen.TypeScriptSettings;
 import software.amazon.smithy.typescript.codegen.TypeScriptWriter;
+import software.amazon.smithy.typescript.codegen.extensions.ExtensionConfigurationInterface;
+import software.amazon.smithy.utils.SmithyInternalApi;
 import software.amazon.smithy.utils.SmithyUnstableApi;
 
 /**
@@ -38,7 +29,19 @@ import software.amazon.smithy.utils.SmithyUnstableApi;
  */
 @SmithyUnstableApi
 public interface TypeScriptIntegration
-        extends SmithyIntegration<TypeScriptSettings, TypeScriptWriter, TypeScriptCodegenContext> {
+    extends SmithyIntegration<TypeScriptSettings, TypeScriptWriter, TypeScriptCodegenContext> {
+    /**
+     * Filters the integration based on {@link TypeScriptSettings}.
+     *
+     * This is annotated as a Smithy Internal API, and may be removed at any point.
+     *
+     * @param settings settings to filter against
+     * @return whether the integration matches the settings or not.
+     */
+    @SmithyInternalApi
+    default boolean matchesSettings(TypeScriptSettings settings) {
+        return true;
+    }
 
     /**
      * Gets a list of plugins to apply to the generated client.
@@ -47,6 +50,13 @@ public interface TypeScriptIntegration
      */
     default List<RuntimeClientPlugin> getClientPlugins() {
         return Collections.emptyList();
+    }
+
+    /**
+     * Mutates in place the loaded list of plugins to apply to the generated client.
+     */
+    default void mutateClientPlugins(List<RuntimeClientPlugin> plugins) {
+        // defaults to no mutation
     }
 
     /**
@@ -99,10 +109,10 @@ public interface TypeScriptIntegration
      * @param writer TypeScript writer to write to.
      */
     default void addConfigInterfaceFields(
-            TypeScriptSettings settings,
-            Model model,
-            SymbolProvider symbolProvider,
-            TypeScriptWriter writer
+        TypeScriptSettings settings,
+        Model model,
+        SymbolProvider symbolProvider,
+        TypeScriptWriter writer
     ) {
         // pass
     }
@@ -200,11 +210,58 @@ public interface TypeScriptIntegration
      * @return Returns a map of config property name and a consumer function with TypeScriptWriter parameter.
      */
     default Map<String, Consumer<TypeScriptWriter>> getRuntimeConfigWriters(
-            TypeScriptSettings settings,
-            Model model,
-            SymbolProvider symbolProvider,
-            LanguageTarget target
+        TypeScriptSettings settings,
+        Model model,
+        SymbolProvider symbolProvider,
+        LanguageTarget target
     ) {
-         return Collections.emptyMap();
+        return Collections.emptyMap();
+    }
+
+    /**
+     * Define a list of client configuration interfaces
+     *
+     * A client configuration interface contains settings that modify a service client.
+     * The client configuration interface enables configuring timeouts, retry strategy, etc for the client.
+     *
+     * Multiple interfaces are used to define the client configuration. For example:
+     *
+     * <pre>{@code
+     * interface ChecksumConfig {
+     *   addChecksumAlgorithm(algo: ChecksumAlgorithm): void;
+     *   checksumAlgorithms(): ChecksumAlgorithm[];
+     * }
+     *
+     * interface RetryConfig {
+     *   setRetryStrategy(algo: RetryStrategy): void;
+     *   retryStrategy(): RetryStrategy;
+     * }
+     *
+     * interface ServiceClientConfiguration extends ChecksumConfig, RetryConfig {
+     * }
+     * }</pre>
+     *
+     * During code-generation, smithy-typescript will aggregate the interfaces and create a single client configuration.
+     *
+     * @return list of client configuration interface
+     */
+    default List<ExtensionConfigurationInterface> getExtensionConfigurationInterfaces(
+        Model model,
+        TypeScriptSettings settings
+    ) {
+        return Collections.emptyList();
+    }
+
+    /**
+     * Allows the customization to write arbitrary preparatory code prior to the returned config object.
+     */
+    @SmithyInternalApi
+    default void prepareCustomizations(
+        TypeScriptWriter writer,
+        LanguageTarget target,
+        TypeScriptSettings settings,
+        Model model
+    ) {
+        return;
     }
 }

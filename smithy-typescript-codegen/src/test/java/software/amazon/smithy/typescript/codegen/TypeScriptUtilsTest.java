@@ -1,3 +1,7 @@
+/*
+ * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 package software.amazon.smithy.typescript.codegen;
 
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -7,6 +11,7 @@ import java.util.Arrays;
 import org.junit.jupiter.api.Test;
 
 public class TypeScriptUtilsTest {
+
     @Test
     public void sanitizesPropertyNames() {
         assertThat(TypeScriptUtils.sanitizePropertyName("foo"), equalTo("foo"));

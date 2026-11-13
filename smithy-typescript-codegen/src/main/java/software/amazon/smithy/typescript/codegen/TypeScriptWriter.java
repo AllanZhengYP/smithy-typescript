@@ -1,24 +1,16 @@
 /*
- * Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
- *
- * Licensed under the Apache License, Version 2.0 (the "License").
- * You may not use this file except in compliance with the License.
- * A copy of the License is located at
- *
- *  http://aws.amazon.com/apache2.0
- *
- * or in the "license" file accompanying this file. This file is distributed
- * on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either
- * express or implied. See the License for the specific language governing
- * permissions and limitations under the License.
+ * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
  */
-
 package software.amazon.smithy.typescript.codegen;
 
+import java.io.File;
+import java.nio.file.Path;
 import java.util.function.BiFunction;
 import java.util.function.UnaryOperator;
 import software.amazon.smithy.codegen.core.CodegenException;
 import software.amazon.smithy.codegen.core.Symbol;
+import software.amazon.smithy.codegen.core.SymbolDependency;
 import software.amazon.smithy.codegen.core.SymbolReference;
 import software.amazon.smithy.codegen.core.SymbolWriter;
 import software.amazon.smithy.model.Model;
@@ -27,6 +19,8 @@ import software.amazon.smithy.model.shapes.MemberShape;
 import software.amazon.smithy.model.shapes.Shape;
 import software.amazon.smithy.model.traits.DeprecatedTrait;
 import software.amazon.smithy.model.traits.DocumentationTrait;
+import software.amazon.smithy.model.traits.InternalTrait;
+import software.amazon.smithy.typescript.codegen.validation.ImportFrom;
 import software.amazon.smithy.utils.SmithyUnstableApi;
 import software.amazon.smithy.utils.StringUtils;
 
@@ -46,7 +40,9 @@ import software.amazon.smithy.utils.StringUtils;
  */
 @SmithyUnstableApi
 public final class TypeScriptWriter extends SymbolWriter<TypeScriptWriter, ImportDeclarations> {
+
     public static final String CODEGEN_INDICATOR = "// smithy-typescript generated code\n";
+    public static final int LINE_WIDTH = 120;
 
     private final String moduleName;
     private final boolean withAttribution;
@@ -105,11 +101,82 @@ public final class TypeScriptWriter extends SymbolWriter<TypeScriptWriter, Impor
      * @param name Type to import.
      * @param as Alias to refer to the type as.
      * @param from Module to import the type from.
+     *
      * @return Returns the writer.
+     *
+     * @deprecated Use {@link TypeScriptWriter#addImport(String, String, TypeScriptDependency)} addImport}
      */
+    @Deprecated
     public TypeScriptWriter addImport(String name, String as, String from) {
+        ImportFrom importFrom = new ImportFrom(from);
+        checkImport(importFrom, from);
+
         getImportContainer().addImport(name, as, from);
         return this;
+    }
+
+    /**
+     * Imports a type using an alias from a module only if necessary.
+     * Adds the dependency.
+     *
+     * @param name Type to import.
+     * @param as Alias to refer to the type as.
+     * @param from PackageContainer to import the type from.
+     * @return Returns the writer.
+     */
+    public TypeScriptWriter addImport(String name, String as, PackageContainer from) {
+        if (from instanceof Dependency) {
+            addDependency((Dependency) from);
+        }
+        return this.addImport(name, as, from.getPackageName());
+    }
+
+    /**
+     * Type-only version of {@link #addImport}.
+     */
+    public TypeScriptWriter addTypeImport(String name, String as, Dependency from) {
+        addDependency(from);
+        return addTypeImport(name, as, from.getPackageName());
+    }
+
+    /**
+     * Same as {@link #addImport(String, String, PackageContainer)} but appends a
+     * submodule path, for example "@smithy/core/cbor".
+     */
+    public TypeScriptWriter addImportSubmodule(String name, String as, PackageContainer from, String submodule) {
+        if (from instanceof Dependency dependency) {
+            addDependency(dependency);
+        }
+        return this.addImport(name, as, from.getPackageName() + submodule);
+    }
+
+    /**
+     * Type-only version of {@link #addImportSubmodule}.
+     */
+    public TypeScriptWriter addTypeImportSubmodule(String name, String as, PackageContainer from, String submodule) {
+        if (from instanceof Dependency dependency) {
+            addDependency(dependency);
+        }
+        return this.addTypeImport(name, as, from.getPackageName() + submodule);
+    }
+
+    /**
+     * Imports a type using an alias from a relative Path.
+     *
+     * @param name Type to import.
+     * @param as Alias to refer to the type as.
+     * @param from Path to import the type from.
+     * @return Returns the writer.
+     */
+    public TypeScriptWriter addRelativeImport(String name, String as, Path from) {
+        return this.addImport(name, as, from.toString().replace(File.separatorChar, '/'));
+    }
+
+    /**
+     * Type-only version of {@link #addRelativeImport}.
+     */
+    public TypeScriptWriter addRelativeTypeImport(String name, String as, Path from) {
+        return this.addTypeImport(name, as, from.toString().replace(File.separatorChar, '/'));
     }
 
     /**
@@ -118,7 +185,7 @@ public final class TypeScriptWriter extends SymbolWriter<TypeScriptWriter, Impor
      * @param runnable Runnable that handles actually writing docs with the writer.
      * @return Returns the writer.
      */
-    TypeScriptWriter writeDocs(Runnable runnable) {
+    public TypeScriptWriter writeDocs(Runnable runnable) {
         pushState("docs");
         write("/**");
         setNewlinePrefix(" * ");
@@ -145,6 +212,62 @@ public final class TypeScriptWriter extends SymbolWriter<TypeScriptWriter, Impor
     }
 
     /**
+     * As openBlock, but collapses all space between open and close strings
+     * if the condition is not met.
+     */
+    public TypeScriptWriter openCollapsibleBlock(
+        String open,
+        String close,
+        boolean condition,
+        Object[] args,
+        Runnable runnable
+    ) {
+        if (condition) {
+            openBlock(open, close, args, runnable);
+        } else {
+            write(open + close, args);
+        }
+        return this;
+    }
+
+    public TypeScriptWriter openCollapsibleBlock(String open, String close, boolean condition, Runnable runnable) {
+        return openCollapsibleBlock(open, close, condition, new Object[] {}, runnable);
+    }
+
+    public TypeScriptWriter openCollapsibleBlock(
+        String open,
+        String close,
+        boolean condition,
+        Object arg1,
+        Runnable runnable
+    ) {
+        return openCollapsibleBlock(open, close, condition, new Object[] {arg1}, runnable);
+    }
+
+    public TypeScriptWriter openCollapsibleBlock(
+        String open,
+        String close,
+        boolean condition,
+        Object arg1,
+        Object arg2,
+        Runnable runnable
+    ) {
+        return openCollapsibleBlock(open, close, condition, new Object[] {arg1, arg2}, runnable);
+    }
+
+    public TypeScriptWriter openCollapsibleBlock(
+        String open,
+        String close,
+        boolean condition,
+        Object arg1,
+        Object arg2,
+        Object arg3,
+        Runnable runnable
+    ) {
+        return openCollapsibleBlock(open, close, condition, new Object[] {arg1, arg2, arg3}, runnable);
+    }
+
+    /**
      * Modifies and writes shape documentation comments if docs are present.
      *
      * @param shape Shape to write the documentation of.
@@ -152,16 +275,31 @@ public final class TypeScriptWriter extends SymbolWriter<TypeScriptWriter, Impor
      * @return Returns true if docs were written.
      */
     boolean writeShapeDocs(Shape shape, UnaryOperator<String> preprocessor) {
-        return shape.getTrait(DocumentationTrait.class)
-                .map(DocumentationTrait::getValue)
-                .map(docs -> {
-                    docs = preprocessor.apply(docs);
-                    if (shape.getTrait(DeprecatedTrait.class).isPresent()) {
-                        docs = "@deprecated\n\n" + docs;
-                    }
-                    writeDocs(docs);
-                    return true;
-                }).orElse(false);
+        boolean hasDocumentation = shape.getTrait(DocumentationTrait.class).isPresent();
+        boolean hasDeprecation = shape.getTrait(DeprecatedTrait.class).isPresent();
+
+        if (hasDocumentation || hasDeprecation) {
+            String docs =
+                hasDocumentation ? shape.getTrait(DocumentationTrait.class).get().getValue() : "";
+            docs = docs.replace("{", "\\{").replace("}", "\\}");
+
+            if (hasDeprecation) {
+                DeprecatedTrait deprecatedTrait = shape.expectTrait(DeprecatedTrait.class);
+                String deprecationAnnotation = buildDeprecationAnnotation(deprecatedTrait);
+                if (hasDocumentation) {
+                    docs = punctuate(docs) + "\n\n" + deprecationAnnotation;
+                } else {
+                    docs = deprecationAnnotation;
+                }
+            }
+
+            docs = preprocessor.apply(docs);
+            docs = addReleaseTag(shape, docs);
+            writeDocs(docs);
+            return true;
+        }
+
+        return false;
     }
 
     /**
@@ -171,7 +309,11 @@ public final class TypeScriptWriter extends SymbolWriter<TypeScriptWriter, Impor
      * @return Returns true if docs were written.
      */
     boolean writeShapeDocs(Shape shape) {
-        return writeShapeDocs(shape, (docs) -> docs);
+        boolean didWrite = writeShapeDocs(shape, docs -> docs);
+        if (!didWrite) {
+            writeDocs("@public");
+        }
+        return didWrite;
     }
 
     /**
@@ -182,21 +324,117 @@ public final class TypeScriptWriter extends SymbolWriter<TypeScriptWriter, Impor
      * @return Returns true if docs were written.
      */
     boolean writeMemberDocs(Model model, MemberShape member) {
-        return member.getMemberTrait(model, DocumentationTrait.class)
-                .map(DocumentationTrait::getValue)
-                .map(docs -> {
-                    if (member.getTrait(DeprecatedTrait.class).isPresent() || isTargetDeprecated(model, member)) {
-                        docs = "@deprecated\n\n" + docs;
-                    }
-                    writeDocs(docs);
-                    return true;
-                }).orElse(false);
+        boolean hasDocumentation = member.getMemberTrait(model, DocumentationTrait.class).isPresent();
+        boolean hasDeprecation =
+            member.getTrait(DeprecatedTrait.class).isPresent() || isTargetDeprecated(model, member);
+
+        if (hasDocumentation || hasDeprecation) {
+            String docs =
+                hasDocumentation ? member.getMemberTrait(model, DocumentationTrait.class).get().getValue() : "";
+            docs = docs.replace("{", "\\{").replace("}", "\\}");
+
+            if (hasDeprecation) {
+                DeprecatedTrait deprecatedTrait = member
+                    .getTrait(DeprecatedTrait.class)
+                    .or(() -> model.expectShape(member.getTarget()).getTrait(DeprecatedTrait.class))
+                    .orElseThrow();
+                String deprecationAnnotation = buildDeprecationAnnotation(deprecatedTrait);
+                if (hasDocumentation) {
+                    docs = punctuate(docs) + "\n\n" + deprecationAnnotation;
+                } else {
+                    docs = deprecationAnnotation;
+                }
+            }
+
+            docs = addReleaseTag(member, docs);
+            writeDocs(docs);
+            return true;
+        }
+
+        return false;
     }
 
     private boolean isTargetDeprecated(Model model, MemberShape member) {
-        return model.expectShape(member.getTarget()).getTrait(DeprecatedTrait.class).isPresent()
-               // don't consider deprecated prelude shapes (like PrimitiveBoolean)
-               && !Prelude.isPreludeShape(member.getTarget());
+        return (model.expectShape(member.getTarget()).getTrait(DeprecatedTrait.class).isPresent() &&
+        // don't consider deprecated prelude shapes (like PrimitiveBoolean)
+            !Prelude.isPreludeShape(member.getTarget()));
+    }
+
+    /**
+     * Builds a JSDoc {@code @deprecated} annotation from a {@link DeprecatedTrait},
+     * synthesizing the {@code message} and {@code since} fields into the deprecation text.
+     */
+    static String buildDeprecationAnnotation(DeprecatedTrait trait) {
+        StringBuilder annotation = new StringBuilder("@deprecated");
+        String message = trait.getMessage().orElse(null);
+        String since = trait.getSince().orElse(null);
+
+        if (message != null && since != null) {
+            annotation
+                .append(" (since %s) ".formatted(since))
+                .append(message);
+        } else if (message != null) {
+            annotation.append(" ").append(message);
+        } else if (since != null) {
+            annotation.append(" since %s".formatted(since));
+        } else {
+            annotation.append(" deprecated");
+        }
+
+        return punctuate(annotation.toString());
+    }
+
+    /**
+     * Adds a period to the end of the string if no punctuation is present.
+     * It doesn't matter if it's not a grammatical sentence, since the period
+     * serves as a visual separator in code comments.
+     */
+    static String punctuate(String s) {
+        String state = s.trim();
+        if (state.matches("(.*?)\\w$")) {
+            return state + ".";
+        }
+        return s;
+    }
+
+    private String addReleaseTag(Shape shape, String docs) {
+        if (shape.getTrait(InternalTrait.class).isPresent()) {
+            docs = docs + "\n@internal";
+        } else {
+            docs = docs + "\n@public";
+        }
+        return docs;
+    }
+
+    /**
+     * This is private because the string-value [from] signature is
+     * deprecated for the corresponding addImport() signature. Importing a string
+     * makes it difficult to ensure the package is added to the dependency manifest,
+     * so package imports should be by package object, and relative imports by path object.
+     */
+    private TypeScriptWriter addTypeImport(String name, String as, String from) {
+        ImportFrom importFrom = new ImportFrom(from);
+        checkImport(importFrom, from);
+        getImportContainer().addTypeImport(name, as, from);
+        return this;
+    }
+
+    /**
+     * Check that the import source string has been registered with the dependency manifest
+     * if it is a package, not a node package, and not a relative path.
+     */
+    private void checkImport(ImportFrom importFrom, String from) {
+        if (importFrom.isDeclarablePackageImport()) {
+            String packageName = importFrom.getPackageName();
+            if (getDependencies().stream().map(SymbolDependency::getPackageName).noneMatch(packageName::equals)) {
+                throw new CodegenException(
+                    """
+                    The import %s does not correspond to a registered dependency.
+                    TypeScriptWriter::addDependency() is required before ::addImport().
+                    """.formatted(from)
+                );
+            }
+        }
     }
 
     @Override
@@ -219,6 +457,7 @@ public final class TypeScriptWriter extends SymbolWriter<TypeScriptWriter, Impor
      * Adds TypeScript symbols for the "$T" formatter.
      */
     private final class TypeScriptSymbolFormatter implements BiFunction<Object, String, String> {
+
         @Override
         public String apply(Object type, String indent) {
             if (type instanceof Symbol) {
@@ -231,7 +470,8 @@ public final class TypeScriptWriter extends SymbolWriter<TypeScriptWriter, Impor
                 return typeSymbol.getAlias();
             } else {
                 throw new CodegenException(
-                        "Invalid type provided to $T. Expected a Symbol or SymbolReference, but found `" + type + "`");
+                    "Invalid type provided to $T. Expected a Symbol or SymbolReference, but found `" + type + "`"
+                );
             }
         }
     }

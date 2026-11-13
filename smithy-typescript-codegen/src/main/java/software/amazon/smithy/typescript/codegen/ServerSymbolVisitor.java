@@ -1,18 +1,7 @@
 /*
- * Copyright 2021 Amazon.com, Inc. or its affiliates. All Rights Reserved.
- *
- * Licensed under the Apache License, Version 2.0 (the "License").
- * You may not use this file except in compliance with the License.
- * A copy of the License is located at
- *
- *  http://aws.amazon.com/apache2.0
- *
- * or in the "license" file accompanying this file. This file is distributed
- * on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either
- * express or implied. See the License for the specific language governing
- * permissions and limitations under the License.
+ * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
  */
-
 package software.amazon.smithy.typescript.codegen;
 
 import static software.amazon.smithy.typescript.codegen.TypeScriptDependency.SERVER_COMMON;
@@ -39,6 +28,7 @@ import software.amazon.smithy.utils.StringUtils;
  */
 @SmithyInternalApi
 final class ServerSymbolVisitor extends ShapeVisitor.Default<Symbol> implements SymbolProvider {
+
     static final String SERVER_FOLDER = "server";
     private static final Logger LOGGER = Logger.getLogger(ServerSymbolVisitor.class.getName());
 
@@ -53,23 +43,22 @@ final class ServerSymbolVisitor extends ShapeVisitor.Default<Symbol> implements 
 
         // Load reserved words from a new-line delimited file.
         ReservedWords reservedWords = new ReservedWordsBuilder()
-                .loadWords(TypeScriptCodegenPlugin.class.getResource("reserved-words.txt"))
-                .build();
+            .loadWords(TypeScriptCodegenPlugin.class.getResource("reserved-words.txt"))
+            .build();
 
         escaper = ReservedWordSymbolProvider.builder()
-                .nameReservedWords(reservedWords)
-                // Only escape words when the symbol has a definition file to
-                // prevent escaping intentional references to built-in types.
-                .escapePredicate((shape, symbol) -> !StringUtils.isEmpty(symbol.getDefinitionFile()))
-                .buildEscaper();
+            .nameReservedWords(reservedWords)
+            // Only escape words when the symbol has a definition file to
+            // prevent escaping intentional references to built-in types.
+            .escapePredicate((shape, symbol) -> !StringUtils.isEmpty(symbol.getDefinitionFile()))
+            .buildEscaper();
 
         moduleNameDelegator = new ModuleNameDelegator();
     }
 
     @Override
     public Symbol toSymbol(Shape shape) {
-        if (shape.getType() == ShapeType.SERVICE
-            || shape.getType() == ShapeType.OPERATION) {
+        if (shape.getType() == ShapeType.SERVICE || shape.getType() == ShapeType.OPERATION) {
             Symbol symbol = shape.accept(this);
             LOGGER.fine(() -> "Creating symbol from " + shape + ": " + symbol);
             return escaper.escapeSymbol(shape, symbol);
@@ -89,8 +78,7 @@ final class ServerSymbolVisitor extends ShapeVisitor.Default<Symbol> implements 
         builder.putProperty("outputType", intermediate.toBuilder().name(shapeName + "ServerOutput").build());
         builder.putProperty("errorsType", intermediate.toBuilder().name(shapeName + "Errors").build());
         builder.putProperty("serializerType", intermediate.toBuilder().name(shapeName + "Serializer").build());
-        builder.putProperty("handler",
-                intermediate.toBuilder().name(shapeName + "Handler").build());
+        builder.putProperty("handler", intermediate.toBuilder().name(shapeName + "Handler").build());
         return builder.build();
     }
 
@@ -102,10 +90,8 @@ final class ServerSymbolVisitor extends ShapeVisitor.Default<Symbol> implements 
 
         Symbol intermediate = createGeneratedSymbolBuilder(shape, serviceName, moduleName).build();
         Symbol.Builder builder = intermediate.toBuilder().addDependency(SERVER_COMMON);
-        builder.putProperty("operations",
-                intermediate.toBuilder().name(serviceName + "Operations").build());
-        builder.putProperty("handler",
-                intermediate.toBuilder().name(serviceName + "Handler").build());
+        builder.putProperty("operations", intermediate.toBuilder().name(serviceName + "Operations").build());
+        builder.putProperty("handler", intermediate.toBuilder().name(serviceName + "Handler").build());
         return builder.build();
     }
 
@@ -120,17 +106,16 @@ final class ServerSymbolVisitor extends ShapeVisitor.Default<Symbol> implements 
     }
 
     private Symbol.Builder createGeneratedSymbolBuilder(Shape shape, String typeName, String namespace) {
-        String prefixedNamespace = Paths.get(".", CodegenUtils.SOURCE_FOLDER,
-            (namespace.startsWith(".") ? namespace.substring(1) : namespace)).toString();
-        return createSymbolBuilder(shape, typeName, prefixedNamespace)
-                .definitionFile(toFilename(prefixedNamespace));
+        String prefixedNamespace = Paths.get(
+            ".",
+            CodegenUtils.SOURCE_FOLDER,
+            (namespace.startsWith(".") ? namespace.substring(1) : namespace)
+        ).toString();
+        return createSymbolBuilder(shape, typeName, prefixedNamespace).definitionFile(toFilename(prefixedNamespace));
     }
 
     private Symbol.Builder createSymbolBuilder(Shape shape, String typeName, String namespace) {
-        return Symbol.builder()
-                .putProperty("shape", shape)
-                .name(typeName)
-                .namespace(namespace, "/");
+        return Symbol.builder().putProperty("shape", shape).name(typeName).namespace(namespace, "/");
     }
 
     private String toFilename(String namespace) {

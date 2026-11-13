@@ -1,0 +1,26 @@
+{
+  "compilerOptions": {
+    "strict": false,
+    "esModuleInterop": true,
+    "lib": ["es2022", "dom"],
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "noFallthroughCasesInSwitch": true,
+    "paths": {
+      "@smithy/*": ["./packages/*/src", "./smithy-typescript-ssdk-libs/*/src"]
+    },
+    "preserveConstEnums": true,
+    "removeComments": true,
+    "resolveJsonModule": true,
+    "target": "es2022",
+    "types": ["node"],
+    "useUnknownInCatchVariables": false,
+    "skipLibCheck": true,
+    "experimentalDecorators": true,
+    "jsx": "react",
+    "jsxFactory": "JSX.createElement",
+    "jsxFragmentFactory": "JSX.Fragment"
+  },
+  "include": ["packages/", "smithy-typescript-ssdk-libs/"],
+  "exclude": ["node_modules/", "**/*.spec.ts", "vitest.*"]
+}

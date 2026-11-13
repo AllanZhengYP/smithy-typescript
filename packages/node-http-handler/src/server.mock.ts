@@ -1,0 +1,106 @@
+import { readFileSync } from "node:fs";
+import type { Http2Server } from "node:http2";
+import type { Server as HttpServer, IncomingMessage, ServerResponse } from "node:http";
+import type { Server as HttpsServer } from "node:https";
+import { join } from "node:path";
+import { Readable } from "node:stream";
+import type { HeaderBag, HttpResponse, NodeJsRuntimeBlobTypes } from "@smithy/types";
+
+import { node_http2 } from "./node-http2";
+import { node_http } from "./node-http.spec";
+import { node_https } from "./node-https";
+import { timing } from "./timing";
+
+const { createServer: createHttpsServer } = node_https;
+const fixturesDir = join(__dirname, "..", "fixtures");
+
+const setResponseHeaders = (response: ServerResponse, headers: HeaderBag) => {
+  for (const [key, value] of Object.entries(headers)) {
+    response.setHeader(key, value);
+  }
+};
+
+const setResponseBody = (response: ServerResponse, body: string | NodeJsRuntimeBlobTypes) => {
+  if (body instanceof Readable) {
+    body.pipe(response);
+  } else {
+    response.end(body);
+  }
+};
+
+export const createResponseFunction =
+  (httpResp: HttpResponse) => (request: IncomingMessage, response: ServerResponse) => {
+    response.statusCode = httpResp.statusCode;
+    if (httpResp.reason) {
+      response.statusMessage = httpResp.reason;
+    }
+    setResponseHeaders(response, httpResp.headers);
+    setResponseBody(response, httpResp.body);
+  };
+
+export const createResponseFunctionWithDelay =
+  (httpResp: HttpResponse, delay: number) => (request: IncomingMessage, response: ServerResponse) => {
+    response.statusCode = httpResp.statusCode;
+    if (httpResp.reason) {
+      response.statusMessage = httpResp.reason;
+    }
+    setResponseHeaders(response, httpResp.headers);
+    timing.setTimeout(() => setResponseBody(response, httpResp.body), delay);
+  };
+
+export const createContinueResponseFunction =
+  (httpResp: HttpResponse) => (request: IncomingMessage, response: ServerResponse) => {
+    response.writeContinue();
+    timing.setTimeout(() => {
+      createResponseFunction(httpResp)(request, response);
+    }, 100);
+  };
+
+export const createMockHttpsServer = (): HttpsServer => {
+  const server = createHttpsServer({
+    key: readFileSync(join(fixturesDir, "test-server-key.pem")),
+    cert: readFileSync(join(fixturesDir, "test-server-cert.pem")),
+  });
+  return server;
+};
+
+export const createMockHttpServer = (): HttpServer => {
+  return node_http.createServer();
+};
+
+export const createMockHttp2Server = (): Http2Server => {
+  return node_http2.createServer();
+};
+
+export const createMirrorResponseFunction =
+  (httpResp: HttpResponse) => (request: IncomingMessage, response: ServerResponse) => {
+    const bufs: Buffer[] = [];
+    request.on("data", (chunk) => {
+      bufs.push(chunk);
+    });
+    request.on("end", () => {
+      response.statusCode = httpResp.statusCode;
+      setResponseHeaders(response, httpResp.headers);
+      setResponseBody(response, Buffer.concat(bufs));
+    });
+    request.on("error", (err) => {
+      response.statusCode = 500;
+      setResponseHeaders(response, httpResp.headers);
+      setResponseBody(response, err.message);
+    });
+  };
+
+export const getResponseBody = (response: HttpResponse) => {
+  return new Promise<string>((resolve, reject) => {
+    const bufs: Buffer[] = [];
+    response.body.on("data", function (d: Buffer) {
+      bufs.push(d);
+    });
+    response.body.on("end", function () {
+      resolve(Buffer.concat(bufs).toString());
+    });
+    response.body.on("error", (err: Error) => {
+      reject(err);
+    });
+  });
+};

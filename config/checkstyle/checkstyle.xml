@@ -1,17 +1,7 @@
 <?xml version="1.0"?>
 <!--
-  ~ Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
-  ~
-  ~ Licensed under the Apache License, Version 2.0 (the "License").
-  ~ You may not use this file except in compliance with the License.
-  ~ A copy of the License is located at
-  ~
-  ~  http://aws.amazon.com/apache2.0
-  ~
-  ~ or in the "license" file accompanying this file. This file is distributed
-  ~ on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either
-  ~ express or implied. See the License for the specific language governing
-  ~ permissions and limitations under the License.
+  ~ Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+  ~ SPDX-License-Identifier: Apache-2.0
   -->
 
 <!DOCTYPE module PUBLIC
@@ -29,30 +19,16 @@
         <property name="fileNamePattern" value="(module\-info\.java$|Test.java$|src/test/java)"/>
     </module>
 
-    <!-- Files must contain a copyright header. -->
+    <!-- Files must contain a copyright header without a year. The check for 2019-2023 is retained for historical purposes. -->
     <module name="RegexpHeader">
         <property name="header"
-                  value="/\*\n \* Copyright 20(19|20|21|22) Amazon\.com, Inc\. or its affiliates\. All Rights Reserved\.\n"/>
+                  value="/\*\n \* Copyright( 20(19|20|21|22|23)|) Amazon\.com, Inc\. or its affiliates\. All Rights Reserved\.\n"/>
         <property name="fileExtensions" value="java"/>
-    </module>
-
-    <module name="NewlineAtEndOfFile">
-        <property name="lineSeparator" value="lf_cr_crlf"/>
-    </module>
-
-    <!-- See http://checkstyle.sf.net/config_sizes.html -->
-    <module name="LineLength">
-        <property name="max" value="${checkstyle.linelength}" default="120"/>
-        <property name="ignorePattern" value="^package.*|^import.*|a href|href|http://|https://|ftp://"/>
     </module>
 
     <!-- Checks for whitespace                               -->
     <!-- See http://checkstyle.sf.net/config_whitespace.html -->
     <module name="FileTabCharacter"/>
-    <module name="RegexpSingleline">
-        <property name="format" value="\s+$"/>
-        <property name="message" value="Line has trailing spaces."/>
-    </module>
 
     <module name="TreeWalker">
         <!-- Make comments and annotations available for the suppression comment filter. -->
@@ -78,7 +54,6 @@
         <!-- Checks for Javadoc comments.                     -->
         <!-- See http://checkstyle.sf.net/config_javadoc.html -->
         <module name="JavadocMethod">
-            <property name="scope" value="public"/>
             <property name="allowMissingParamTags" value="true"/>
             <property name="allowMissingReturnTag" value="true"/>
             <property name="allowedAnnotations" value="Override, Test"/>
@@ -108,64 +83,10 @@
             <property name="severity" value="warning"/>
         </module>
 
-        <!-- Checks for whitespace                               -->
-        <!-- See http://checkstyle.sf.net/config_whitespace.html -->
-        <module name="EmptyForIteratorPad"/>
-        <module name="GenericWhitespace"/>
-        <module name="MethodParamPad"/>
-        <module name="NoWhitespaceAfter"/>
-        <module name="NoWhitespaceBefore"/>
-        <module name="OperatorWrap"/>
-        <module name="ParenPad"/>
-        <module name="TypecastParenPad"/>
-        <module name="WhitespaceAfter"/>
-        <module name="WhitespaceAround">
-            <property name="allowEmptyConstructors" value="true"/>
-            <property name="allowEmptyMethods" value="true"/>
-            <property name="allowEmptyTypes" value="true"/>
-            <property name="allowEmptyLoops" value="true"/>
-        </module>
-        <module name="SeparatorWrap">
-            <property name="id" value="SeparatorWrapDot"/>
-            <property name="tokens" value="DOT"/>
-            <property name="option" value="nl"/>
-        </module>
-        <module name="SeparatorWrap">
-            <property name="id" value="SeparatorWrapComma"/>
-            <property name="tokens" value="COMMA"/>
-            <property name="option" value="EOL"/>
-        </module>
-        <module name="EmptyLineSeparator">
-            <property name="allowNoEmptyLineBetweenFields" value="true"/>
-        </module>
-
         <!-- Modifier Checks                                    -->
         <!-- See http://checkstyle.sf.net/config_modifiers.html -->
         <module name="ModifierOrder"/>
         <module name="RedundantModifier"/>
-
-        <!-- Checks for blocks. You know, those {}'s         -->
-        <!-- See http://checkstyle.sf.net/config_blocks.html -->
-        <!-- Braces must not be empty for most language constructs. -->
-        <module name="EmptyBlock">
-            <property name="option" value="TEXT"/>
-            <property name="tokens" value="LITERAL_TRY, LITERAL_FINALLY, LITERAL_IF, LITERAL_ELSE, LITERAL_SWITCH"/>
-        </module>
-        <module name="LeftCurly"/>
-        <module name="NeedBraces">
-            <property name="allowEmptyLoopBody" value="true"/>
-        </module>
-        <module name="RightCurly">
-            <property name="id" value="RightCurlySame"/>
-            <property name="tokens"
-                      value="LITERAL_TRY, LITERAL_CATCH, LITERAL_FINALLY, LITERAL_IF, LITERAL_ELSE"/>
-        </module>
-        <module name="RightCurly">
-            <property name="id" value="RightCurlyAlone"/>
-            <property name="option" value="alone"/>
-            <property name="tokens"
-                      value="CLASS_DEF, METHOD_DEF, LITERAL_FOR, LITERAL_WHILE, STATIC_INIT, INSTANCE_INIT"/>
-        </module>
 
         <!-- Checks for common coding problems               -->
         <!-- See http://checkstyle.sf.net/config_coding.html -->

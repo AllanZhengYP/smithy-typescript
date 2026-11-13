@@ -1,0 +1,128 @@
+import { hasOwn } from "@smithy/core/transport";
+import { HttpRequest as __HttpRequest, collectBody } from "@smithy/core/protocols";
+import { calculateBodyLength } from "@smithy/core/serde";
+import type {
+  HttpResponse,
+  SerdeContext,
+  HeaderBag as __HeaderBag,
+  SerdeContext as __SerdeContext,
+} from "@smithy/types";
+
+import { cbor } from "./cbor";
+import { tag, type tagSymbol } from "./cbor-types";
+
+/**
+ * @internal
+ */
+export const parseCborBody = (streamBody: any, context: SerdeContext): any => {
+  return collectBody(streamBody, context).then(async (bytes) => {
+    if (bytes.length) {
+      try {
+        return cbor.deserialize(bytes);
+      } catch (e: any) {
+        Object.defineProperty(e, "$responseBodyText", {
+          value: context.utf8Encoder(bytes),
+        });
+        throw e;
+      }
+    }
+    return {};
+  });
+};
+
+/**
+ * @internal
+ */
+export const dateToTag = (date: Date): { tag: number | bigint; value: any; [tagSymbol]: true } => {
+  return tag({
+    tag: 1,
+    value: date.getTime() / 1000,
+  });
+};
+
+/**
+ * @internal
+ */
+export const parseCborErrorBody = async (errorBody: any, context: SerdeContext) => {
+  const value = await parseCborBody(errorBody, context);
+  value.message = value.message ?? value.Message;
+  return value;
+};
+
+/**
+ * Trims error.__type
+ * "com.a.b#Error:Sender,tag" -> "com.a.b#Error"
+ *
+ * @internal
+ */
+export const loadSmithyRpcV2CborErrorCode = (output: HttpResponse, data: any): string | undefined => {
+  const sanitizeErrorCode = (rawValue: string | number): string => {
+    let cleanValue = rawValue;
+    if (typeof cleanValue === "number") {
+      cleanValue = cleanValue.toString();
+    }
+    if (cleanValue.indexOf(",") >= 0) {
+      cleanValue = cleanValue.split(",")[0];
+    }
+    if (cleanValue.indexOf(":") >= 0) {
+      cleanValue = cleanValue.split(":")[0];
+    }
+    return cleanValue;
+  };
+
+  if (data["__type"] !== undefined) {
+    return sanitizeErrorCode(data["__type"]);
+  }
+};
+
+/**
+ * @internal
+ */
+export const checkCborResponse = (response: HttpResponse): void => {
+  if (String(response.headers["smithy-protocol"]).toLowerCase() !== "rpc-v2-cbor") {
+    throw new Error("Malformed RPCv2 CBOR response, status: " + response.statusCode);
+  }
+};
+
+/**
+ * @internal
+ */
+export const buildHttpRpcRequest = async (
+  context: __SerdeContext,
+  headers: __HeaderBag,
+  path: string,
+  resolvedHostname: string | undefined,
+  body: any
+): Promise<__HttpRequest> => {
+  const endpoint = await context.endpoint();
+  const { hostname, protocol = "https", port, path: basePath } = endpoint;
+  const contents: any = {
+    protocol,
+    hostname,
+    port,
+    method: "POST",
+    path: basePath.endsWith("/") ? basePath.slice(0, -1) + path : basePath + path,
+    headers: {
+      // intentional copy.
+      ...headers,
+    },
+  };
+  if (resolvedHostname !== undefined) {
+    contents.hostname = resolvedHostname;
+  }
+  if (endpoint.headers) {
+    for (const name in endpoint.headers) {
+      if (!hasOwn(endpoint.headers, name)) {
+        continue;
+      }
+      contents.headers[name] = endpoint.headers[name];
+    }
+  }
+  if (body !== undefined) {
+    contents.body = body;
+    try {
+      contents.headers["content-length"] = String(calculateBodyLength(body));
+    } catch (ignored) {}
+  }
+  return new __HttpRequest(contents);
+};

@@ -1,18 +1,7 @@
 /*
- * Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
- *
- * Licensed under the Apache License, Version 2.0 (the "License").
- * You may not use this file except in compliance with the License.
- * A copy of the License is located at
- *
- *  http://aws.amazon.com/apache2.0
- *
- * or in the "license" file accompanying this file. This file is distributed
- * on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either
- * express or implied. See the License for the specific language governing
- * permissions and limitations under the License.
+ * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
  */
-
 package software.amazon.smithy.typescript.codegen;
 
 import java.io.InputStream;
@@ -31,19 +20,27 @@ import software.amazon.smithy.utils.SmithyInternalApi;
 final class PackageJsonGenerator {
 
     public static final String PACKAGE_JSON_FILENAME = "package.json";
+    public static final String VITEST_CONFIG_FILENAME = "vitest.config.mts";
+    public static final String VITEST_CONFIG_INTEG_FILENAME = "vitest.config.integ.mts";
 
     private PackageJsonGenerator() {}
 
     static void writePackageJson(
-            TypeScriptSettings settings,
-            FileManifest manifest,
-            Map<String, Map<String, SymbolDependency>> dependencies
+        TypeScriptSettings settings,
+        FileManifest manifest,
+        Map<String, Map<String, SymbolDependency>> dependencies
     ) {
         // Write the package.json file.
         InputStream resource = PackageJsonGenerator.class.getResourceAsStream("base-package.json");
-        ObjectNode node = Node.parse(IoUtils.toUtf8String(resource))
-                        .expectObjectNode()
-                        .merge(settings.getPackageJson());
+
+        ObjectNode userSuppliedPackageJson = settings.getPackageJson();
+        ObjectNode defaultPackageJson = Node.parse(IoUtils.toUtf8String(resource)).expectObjectNode();
+
+        ObjectNode mergedScripts = defaultPackageJson
+            .expectObjectMember("scripts")
+            .merge(userSuppliedPackageJson.getObjectMember("scripts").orElse(ObjectNode.builder().build()));
+
+        ObjectNode node = defaultPackageJson.merge(userSuppliedPackageJson).withMember("scripts", mergedScripts);
 
         // Merge TypeScript dependencies into the package.json file.
         for (Map.Entry<String, Map<String, SymbolDependency>> depEntry : dependencies.entrySet()) {
@@ -55,14 +52,52 @@ final class PackageJsonGenerator {
             node = node.withMember(depEntry.getKey(), builder.build());
         }
 
+        // Add test script and vitest.config.mts if specs and their devDependency on vitest has been generated.
+        ObjectNode devDeps = node.getObjectMember("devDependencies").orElse(Node.objectNode());
+        if (devDeps.containsMember(TypeScriptDependency.VITEST.packageName)) {
+            ObjectNode scripts = node.getObjectMember("scripts").orElse(Node.objectNode());
+            String pkgManagerExec = settings.getPackageManager().getExecCommand();
+            scripts = scripts
+                .withMember("test", "%s vitest run --passWithNoTests".formatted(pkgManagerExec))
+                .withMember("test:watch", "%s vitest watch --passWithNoTests".formatted(pkgManagerExec))
+                .withMember(
+                    "test:integration",
+                    "%s vitest run --passWithNoTests -c vitest.config.integ.mts".formatted(pkgManagerExec)
+                )
+                .withMember(
+                    "test:integration:watch",
+                    "%s vitest watch --passWithNoTests -c vitest.config.integ.mts".formatted(pkgManagerExec)
+                );
+            node = node.withMember("scripts", scripts);
+
+            manifest.writeFile(
+                VITEST_CONFIG_FILENAME,
+                IoUtils.toUtf8String(PackageJsonGenerator.class.getResourceAsStream(VITEST_CONFIG_FILENAME))
+            );
+            manifest.writeFile(
+                VITEST_CONFIG_INTEG_FILENAME,
+                IoUtils.toUtf8String(PackageJsonGenerator.class.getResourceAsStream(VITEST_CONFIG_INTEG_FILENAME))
+            );
+        }
+
         // These are currently only generated for clients, but they may be needed for ssdk as well.
         if (settings.generateClient()) {
             // Add the Node vs Browser hook.
-            node = node.withMember("browser", Node.objectNode()
-                    .withMember("./dist-es/runtimeConfig", "./dist-es/runtimeConfig.browser"));
+            node = node.withMember(
+                "browser",
+                node
+                    .getObjectMember("browser")
+                    .orElse(Node.objectNode())
+                    .withMember("./dist-es/runtimeConfig", "./dist-es/runtimeConfig.browser")
+            );
             // Add the ReactNative hook.
-            node = node.withMember("react-native", Node.objectNode()
-                    .withMember("./dist-es/runtimeConfig", "./dist-es/runtimeConfig.native"));
+            node = node.withMember(
+                "react-native",
+                node
+                    .getObjectMember("react-native")
+                    .orElse(Node.objectNode())
+                    .withMember("./dist-es/runtimeConfig", "./dist-es/runtimeConfig.native")
+            );
         }
 
         // Set the package to private if required.
@@ -70,12 +105,25 @@ final class PackageJsonGenerator {
             node = node.withMember("private", true);
         }
 
+        if (!settings.generateIndexTests()) {
+            node = node.withMember("scripts", node.getObjectMember("scripts").get().withoutMember("test:index"));
+        }
+
         // Expand template parameters.
         String template = Node.prettyPrintJson(node);
         template = template.replace("${package}", settings.getPackageName());
         template = template.replace("${packageDescription}", settings.getPackageDescription());
+
+        if (settings.getVersioningScheme().equals("@smithy/core")) {
+            settings.setPackageVersion(TypeScriptDependency.getSmithyCoreVersion());
+        }
+        if (settings.getVersioningScheme().equals("@aws-sdk/client")) {
+            settings.setPackageVersion(TypeScriptDependency.getAwsSdkLeadingClientVersion());
+        }
+
         template = template.replace("${packageVersion}", settings.getPackageVersion());
         template = template.replace("${packageManager}", settings.getPackageManager().getCommand());
+        template = template.replace("${typescriptVersion}", settings.getTypescriptVersion());
         manifest.writeFile(PACKAGE_JSON_FILENAME, template);
     }
 }

@@ -1,18 +1,7 @@
 /*
- * Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
- *
- * Licensed under the Apache License, Version 2.0 (the "License").
- * You may not use this file except in compliance with the License.
- * A copy of the License is located at
- *
- *  http://aws.amazon.com/apache2.0
- *
- * or in the "license" file accompanying this file. This file is distributed
- * on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either
- * express or implied. See the License for the specific language governing
- * permissions and limitations under the License.
+ * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
  */
-
 package software.amazon.smithy.typescript.codegen;
 
 import java.util.Comparator;
@@ -35,10 +24,11 @@ import software.amazon.smithy.utils.SmithyInternalApi;
  * <p>We will generate the following:
  *
  * <pre>{@code
- * export enum TypedYesNo {
+ * export const TypedYesNo = {
  *   YES: "YEP",
  *   NO: "NOPE",
- * }
+ * } as const;
+ * type TypedYesNo = typeof TypedYesNo[keyof typeof TypedYesNo];
  * }</pre>
  *
  * <p>Shapes that refer to this string as a member will use the following
@@ -48,7 +38,7 @@ import software.amazon.smithy.utils.SmithyInternalApi;
  * import { TypedYesNo } from "./TypedYesNo";
  *
  * interface MyStructure {
- *   "yesNo": TypedYesNo | string;
+ *   "yesNo": TypedYesNo;
  * }
  * }</pre>
  */
@@ -81,19 +71,36 @@ final class EnumGenerator implements Runnable {
     // Unnamed enums generate a union of string literals.
     private void generateUnnamedEnum() {
         String variants = TypeScriptUtils.getEnumVariants(enumTrait.getEnumDefinitionValues());
-        writer.write("export type $L = $L", symbol.getName(), variants);
+        writer.writeDocs("@public").write("export type $L = $L", symbol.getName(), variants);
     }
 
     // Named enums generate an actual enum type.
     private void generateNamedEnum() {
-        writer.openBlock("export enum $L {", "}", symbol.getName(), () -> {
-            // Sort the named values to ensure a stable order and sane diffs.
-            // TODO: Should we just sort these in the trait itself?
-            enumTrait.getValues()
+        writer
+            .writeDocs("@public\n@enum")
+            .openBlock("export const $L = {", "} as const;", symbol.getName(), () -> {
+                // Sort the named values to ensure a stable order and sane diffs.
+                // TODO: Should we just sort these in the trait itself?
+                enumTrait
+                    .getValues()
                     .stream()
                     .sorted(Comparator.comparing(e -> e.getName().get()))
                     .forEach(this::writeNamedEnumConstant);
-        });
+            });
+
+        String inline = """
+                        export type %s = (typeof %s)[keyof typeof %s];""".formatted(
+            symbol.getName(),
+            symbol.getName(),
+            symbol.getName()
+        );
+        String breakline = inline.replace("= ", "=\n  ");
+
+        writer
+            .writeDocs("@public")
+            .write(
+                inline.length() <= TypeScriptWriter.LINE_WIDTH ? inline : breakline
+            );
     }
 
     private void writeNamedEnumConstant(EnumDefinition body) {
@@ -101,6 +108,6 @@ final class EnumGenerator implements Runnable {
 
         String name = body.getName().get();
         body.getDocumentation().ifPresent(writer::writeDocs);
-        writer.write("$L = $S,", TypeScriptUtils.sanitizePropertyName(name), body.getValue());
+        writer.write("$L: $S,", TypeScriptUtils.sanitizePropertyName(name), body.getValue());
     }
 }

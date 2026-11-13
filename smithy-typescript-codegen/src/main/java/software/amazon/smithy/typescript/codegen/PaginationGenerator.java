@@ -1,19 +1,7 @@
 /*
- * Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
- *
- * Licensed under the Apache License, Version 2.0 (the "License").
- * You may not use this file except in compliance with the License.
- * A copy of the License is located at
- *
- *  http://aws.amazon.com/apache2.0
- *
- * or in the "license" file accompanying this file. This file is distributed
- * on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either
- * express or implied. See the License for the specific language governing
- * permissions and limitations under the License.
+ * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
  */
-
-
 package software.amazon.smithy.typescript.codegen;
 
 import java.nio.file.Paths;
@@ -28,6 +16,7 @@ import software.amazon.smithy.model.Model;
 import software.amazon.smithy.model.knowledge.PaginatedIndex;
 import software.amazon.smithy.model.knowledge.PaginationInfo;
 import software.amazon.smithy.model.knowledge.TopDownIndex;
+import software.amazon.smithy.model.shapes.MemberShape;
 import software.amazon.smithy.model.shapes.OperationShape;
 import software.amazon.smithy.model.shapes.ServiceShape;
 import software.amazon.smithy.model.traits.PaginatedTrait;
@@ -37,10 +26,14 @@ import software.amazon.smithy.utils.SmithyInternalApi;
 final class PaginationGenerator implements Runnable {
 
     static final String PAGINATION_FOLDER = "pagination";
-    static final String PAGINATION_INTERFACE_FILE =
-        Paths.get(CodegenUtils.SOURCE_FOLDER, PAGINATION_FOLDER, "Interfaces.ts").toString();
+    static final String PAGINATION_INTERFACE_FILE = Paths.get(
+        CodegenUtils.SOURCE_FOLDER,
+        PAGINATION_FOLDER,
+        "Interfaces.ts"
+    ).toString();
 
     private final TypeScriptWriter writer;
+    private final String aggregatedClientName;
     private final PaginationInfo paginatedInfo;
 
     private final Symbol serviceSymbol;
@@ -49,20 +42,18 @@ final class PaginationGenerator implements Runnable {
     private final Symbol outputSymbol;
 
     private final String operationName;
-    private final String methodName;
-    private final String aggregatedClientName;
     private final String paginationType;
 
     PaginationGenerator(
-            Model model,
-            ServiceShape service,
-            OperationShape operation,
-            SymbolProvider symbolProvider,
-            TypeScriptWriter writer,
-            String aggregatedClientName
+        Model model,
+        ServiceShape service,
+        OperationShape operation,
+        SymbolProvider symbolProvider,
+        TypeScriptWriter writer,
+        String aggregatedClientName
     ) {
-
         this.writer = writer;
+        this.aggregatedClientName = aggregatedClientName;
 
         this.serviceSymbol = symbolProvider.toSymbol(service);
         this.operationSymbol = symbolProvider.toSymbol(operation);
@@ -70,11 +61,8 @@ final class PaginationGenerator implements Runnable {
         this.outputSymbol = symbolProvider.toSymbol(operation).expectProperty("outputType", Symbol.class);
 
         this.operationName = operation.getId().getName();
-        this.aggregatedClientName = aggregatedClientName;
 
-        // e.g. listObjects
-        this.methodName = Character.toLowerCase(operationName.charAt(0)) + operationName.substring(1);
-        this.paginationType = this.aggregatedClientName + "PaginationConfiguration";
+        this.paginationType = aggregatedClientName + "PaginationConfiguration";
 
         PaginatedIndex paginatedIndex = PaginatedIndex.of(model);
         Optional<PaginationInfo> paginationInfo = paginatedIndex.getPaginationInfo(service, operation);
@@ -86,82 +74,86 @@ final class PaginationGenerator implements Runnable {
     @Override
     public void run() {
         // Import Service Types
-        writer.addImport(operationSymbol.getName(),
-                operationSymbol.getName(),
-                operationSymbol.getNamespace());
-        writer.addImport(inputSymbol.getName(),
-                inputSymbol.getName(),
-                inputSymbol.getNamespace());
-        writer.addImport(outputSymbol.getName(),
-                outputSymbol.getName(),
-                outputSymbol.getNamespace());
-        String aggregatedClientLocation = serviceSymbol.getNamespace()
-                .replace(serviceSymbol.getName(), aggregatedClientName);
-        writer.addImport(aggregatedClientName, aggregatedClientName, aggregatedClientLocation);
-        writer.addImport(serviceSymbol.getName(), serviceSymbol.getName(), serviceSymbol.getNamespace());
+        writer.addRelativeImport(
+            operationSymbol.getName(),
+            operationSymbol.getName(),
+            Paths.get(".", operationSymbol.getNamespace())
+        );
+        writer.addRelativeImport(
+            inputSymbol.getName(),
+            inputSymbol.getName(),
+            Paths.get(".", inputSymbol.getNamespace())
+        );
+        writer.addRelativeImport(
+            outputSymbol.getName(),
+            outputSymbol.getName(),
+            Paths.get(".", outputSymbol.getNamespace())
+        );
+        writer.addRelativeImport(
+            serviceSymbol.getName(),
+            serviceSymbol.getName(),
+            Paths.get(".", serviceSymbol.getNamespace())
+        );
 
         // Import Pagination types
-        writer.addImport("Paginator", "Paginator", "@aws-sdk/types");
-        writer.addImport(paginationType, paginationType,
-            Paths.get(".", PAGINATION_INTERFACE_FILE.replace(".ts", "")).toString());
+        writer.addTypeImport("Paginator", null, TypeScriptDependency.SMITHY_TYPES);
+        writer.addRelativeTypeImport(
+            paginationType,
+            paginationType,
+            Paths.get(".", PAGINATION_INTERFACE_FILE.replace(".ts", ""))
+        );
 
-        writeCommandRequest();
-        writeMethodRequest();
         writePager();
     }
 
-    static String getOutputFilelocation(OperationShape operation) {
-        return Paths.get(CodegenUtils.SOURCE_FOLDER, PAGINATION_FOLDER,
-                operation.getId().getName() + "Paginator.ts").toString();
+    static String getOutputFileLocation(OperationShape operation) {
+        return Paths.get(
+            CodegenUtils.SOURCE_FOLDER,
+            PAGINATION_FOLDER,
+            operation.getId().getName() + "Paginator.ts"
+        ).toString();
     }
 
     static void generateServicePaginationInterfaces(
-            String aggregatedClientName,
-            Symbol service,
-            TypeScriptWriter writer
+        String aggregatedClientName,
+        Symbol service,
+        TypeScriptWriter writer
     ) {
-        writer.addImport("PaginationConfiguration", "PaginationConfiguration", "@aws-sdk/types");
-        String aggregatedClientLocation = service.getNamespace().replace(service.getName(), aggregatedClientName);
-        writer.addImport(aggregatedClientName, aggregatedClientName, aggregatedClientLocation);
-        writer.addImport(service.getName(), service.getName(), service.getNamespace());
-
-        writer.openBlock("export interface $LPaginationConfiguration extends PaginationConfiguration {",
-                "}", aggregatedClientName, () -> {
-            writer.write("client: $L | $L;", aggregatedClientName, service.getName());
-        });
+        writer.addTypeImport("PaginationConfiguration", null, TypeScriptDependency.SMITHY_TYPES);
+        writer.addRelativeImport(service.getName(), service.getName(), Paths.get(".", service.getNamespace()));
+        writer
+            .writeDocs("@public")
+            .openBlock(
+                "export interface $LPaginationConfiguration extends PaginationConfiguration {",
+                "}",
+                aggregatedClientName,
+                () -> {
+                    writer.write("client: $L;", service.getName());
+                }
+            );
     }
 
     private static String getModulePath(String fileLocation) {
-        return fileLocation.substring(
-            fileLocation.lastIndexOf("/") + 1,
-            fileLocation.length()
-        ).replace(".ts", "");
+        return fileLocation.substring(fileLocation.lastIndexOf("/") + 1, fileLocation.length()).replace(".ts", "");
     }
 
-    static void writeIndex(
-            Model model,
-            ServiceShape service,
-            FileManifest fileManifest
-    ) {
+    static void writeIndex(Model model, ServiceShape service, FileManifest fileManifest) {
         TypeScriptWriter writer = new TypeScriptWriter("");
-        writer.write("export * from \"./$L\"", getModulePath(PAGINATION_INTERFACE_FILE));
+        writer.write("export * from \"./$L\";", getModulePath(PAGINATION_INTERFACE_FILE));
 
         TopDownIndex topDownIndex = TopDownIndex.of(model);
         Set<OperationShape> containedOperations = new TreeSet<>(topDownIndex.getContainedOperations(service));
         for (OperationShape operation : containedOperations) {
             if (operation.hasTrait(PaginatedTrait.ID)) {
-                String outputFilepath = PaginationGenerator.getOutputFilelocation(operation);
-                writer.write("export * from \"./$L\"", getModulePath(outputFilepath));
+                String outputFilepath = PaginationGenerator.getOutputFileLocation(operation);
+                writer.write("export * from \"./$L\";", getModulePath(outputFilepath));
             }
         }
 
         fileManifest.writeFile(
             Paths.get(CodegenUtils.SOURCE_FOLDER, PAGINATION_FOLDER, "index.ts").toString(),
-            writer.toString());
-    }
-
-    private String destructurePath(String path) {
-        return "."  + path.replace(".", "!.");
+            writer.toString()
+        );
     }
 
     private void writePager() {
@@ -172,74 +164,39 @@ final class PaginationGenerator implements Runnable {
         String inputTokenName = paginatedInfo.getPaginatedTrait().getInputToken().get();
         String outputTokenName = paginatedInfo.getPaginatedTrait().getOutputToken().get();
 
-        writer.openBlock(
-                "export async function* paginate$L(config: $L, input: $L, ...additionalArguments: any): Paginator<$L>{",
-                "}",  operationName, paginationType, inputTypeName, outputTypeName, () -> {
-            String destructuredInputTokenName = destructurePath(inputTokenName);
-            writer.write("// ToDo: replace with actual type instead of typeof input$L", destructuredInputTokenName);
-            writer.write("let token: typeof input$L | undefined = config.startingToken || undefined;",
-                    destructuredInputTokenName);
+        writer.addDependency(TypeScriptDependency.SMITHY_CORE);
+        writer.addImport("createPaginator", null, TypeScriptDependency.SMITHY_CORE);
 
-            writer.write("let hasNext = true;");
-            writer.write("let page: $L;", outputTypeName);
-            writer.openBlock("while (hasNext) {", "}", () -> {
-                writer.write("input$L = token;", destructuredInputTokenName);
+        writer.writeDocs("@public");
 
-                if (paginatedInfo.getPageSizeMember().isPresent()) {
-                    String pageSize = paginatedInfo.getPageSizeMember().get().getMemberName();
-                    writer.write("input[$S] = config.pageSize;", pageSize);
-                }
-
-                writer.openBlock("if (config.client instanceof $L) {", "}", aggregatedClientName, () -> {
-                    writer.write("page = await makePagedRequest(config.client, input, ...additionalArguments);");
-                });
-                writer.openBlock("else if (config.client instanceof $L) {", "}", serviceTypeName, () -> {
-                    writer.write("page = await makePagedClientRequest(config.client, input, ...additionalArguments);");
-                });
-                writer.openBlock("else {", "}", () -> {
-                    writer.write("throw new Error(\"Invalid client, expected $L | $L\");",
-                            aggregatedClientName, serviceTypeName);
-                });
-
-                writer.write("yield page;");
-                writer.write("const prevToken = token;");
-                writer.write("token = page$L;", destructurePath(outputTokenName));
-                writer.write("hasNext = !!(token && (!config.stopOnSameToken || token !== prevToken));");
-            });
-
-            writer.write("// @ts-ignore");
-            writer.write("return undefined;");
-        });
-    }
-
-
-    /**
-     * Paginated command that calls client.method({...}) under the hood. This is meant for server side environments and
-     * exposes the entire service.
-     */
-    private void writeMethodRequest() {
-        writer.writeDocs("@private");
-        writer.openBlock(
-                "const makePagedRequest = async (client: $L, input: $L, ...args: any): Promise<$L> => {",
-                "}", aggregatedClientName, inputSymbol.getName(),
-                outputSymbol.getName(), () -> {
-            writer.write("// @ts-ignore");
-            writer.write("return await client.$L(input, ...args);", methodName);
-        });
-    }
-
-    /**
-     * Paginated command that calls CommandClient().send({...}) under the hood. This is meant for client side (browser)
-     * environments and does not generally expose the entire service.
-     */
-    private void writeCommandRequest() {
-        writer.writeDocs("@private");
-        writer.openBlock(
-                "const makePagedClientRequest = async (client: $L, input: $L, ...args: any): Promise<$L> => {",
-                "}", serviceSymbol.getName(), inputSymbol.getName(),
-                outputSymbol.getName(), () -> {
-            writer.write("// @ts-ignore");
-            writer.write("return await client.send(new $L(input), ...args);", operationSymbol.getName());
-        });
+        writer
+            .pushState()
+            .putContext("operation", operationName)
+            .putContext("aggClient", aggregatedClientName)
+            .putContext("inputType", inputTypeName)
+            .putContext("outputType", outputTypeName)
+            .putContext("paginationType", paginationType)
+            .putContext("serviceTypeName", serviceTypeName)
+            .putContext("operationName", operationSymbol.getName())
+            .putContext("inputToken", inputTokenName)
+            .putContext("outputToken", outputTokenName)
+            .putContext(
+                "pageSizeMember",
+                paginatedInfo.getPageSizeMember().map(MemberShape::getMemberName).orElse("")
+            )
+            .write(
+                """
+                export const paginate${operation:L}: (
+                  config: ${aggClient:L}PaginationConfiguration,
+                  input: ${inputType:L},
+                  ...rest: any[]
+                ) => Paginator<${outputType:L}> = createPaginator<
+                  ${paginationType:L},
+                  ${inputType:L},
+                  ${outputType:L}
+                >(${serviceTypeName:L}, ${operationName:L}, ${inputToken:S}, ${outputToken:S}, ${pageSizeMember:S});
+                """
+            )
+            .popState();
     }
 }

@@ -1,0 +1,39 @@
+import type { StructureSchema as IStructureSchema, SchemaRef, SchemaTraits } from "@smithy/types";
+
+import { Schema } from "./Schema";
+
+/**
+ * A structure schema has a known list of members. This is also used for unions.
+ *
+ * @internal
+ * @deprecated use StaticSchema
+ */
+export class StructureSchema extends Schema implements IStructureSchema {
+  public static symbol = Symbol.for("@smithy/str");
+  declare name: string;
+  declare traits: SchemaTraits;
+  public memberNames!: string[];
+  public memberList!: SchemaRef[];
+  protected readonly symbol = StructureSchema.symbol;
+}
+
+/**
+ * Factory for StructureSchema.
+ *
+ * @internal
+ * @deprecated use StaticSchema
+ */
+export const struct = (
+  namespace: string,
+  name: string,
+  traits: SchemaTraits,
+  memberNames: string[],
+  memberList: SchemaRef[]
+): StructureSchema =>
+  Schema.assign(new StructureSchema(), {
+    name,
+    namespace,
+    traits,
+    memberNames,
+    memberList,
+  });

@@ -1,0 +1,829 @@
+import { CborCodec, cbor, dateToTag } from "@smithy/core/cbor";
+import { HttpResponse } from "@smithy/core/protocols";
+import { NormalizedSchema, TypeRegistry } from "@smithy/core/schema";
+import { fromUtf8, toUtf8 } from "@smithy/core/serde";
+import type {
+  BlobSchema,
+  BooleanSchema,
+  Message as EventMessage,
+  NumericSchema,
+  StaticErrorSchema,
+  StaticSimpleSchema,
+  StaticStructureSchema,
+  StringSchema,
+  TimestampEpochSecondsSchema,
+} from "@smithy/types";
+import { describe, expect, test as it } from "vitest";
+
+import { EventStreamSerde } from "./EventStreamSerde";
+import { EventStreamCodec } from "./eventstream-codec/EventStreamCodec";
+import { EventStreamMarshaller } from "./eventstream-serde/EventStreamMarshaller";
+
+describe(EventStreamSerde.name, () => {
+  describe("event stream serde", () => {
+    const cborCodec = new CborCodec();
+
+    // this represents elements injected by the HttpProtocol caller.
+    // we use the real event stream marshaller (universal) here to get an accurate integration test.
+    const impl = {
+      serializer: cborCodec.createSerializer(),
+      deserializer: cborCodec.createDeserializer(),
+      getEventStreamMarshaller() {
+        return this.serdeContext.eventStreamMarshaller;
+      },
+      serdeContext: {
+        eventStreamMarshaller: new EventStreamMarshaller({
+          utf8Encoder: toUtf8,
+          utf8Decoder: fromUtf8,
+        }),
+      },
+      getDefaultContentType() {
+        return "application/cbor";
+      },
+    };
+
+    const eventStreamSerde = new EventStreamSerde({
+      marshaller: impl.getEventStreamMarshaller(),
+      serializer: impl.serializer,
+      deserializer: impl.deserializer,
+      defaultContentType: impl.getDefaultContentType(),
+    });
+
+    const eventStreamUnionSchema = [
+      3,
+      "ns",
+      "EventStreamStructure",
+      { streaming: 1 },
+      ["A", "B", "C", "Payload", "TextPayload", "CustomHeaders", "NoOp"],
+      // D is omitted to represent an unknown event.
+      [
+        [3, "ns", "A", 0, ["name"], [0]] satisfies StaticStructureSchema,
+        [3, "ns", "B", 0, ["name"], [0]] satisfies StaticStructureSchema,
+        [3, "ns", "C", 0, ["name"], [0]] satisfies StaticStructureSchema,
+        [
+          3,
+          "ns",
+          "Payload",
+          0,
+          ["payload"],
+          [[0, "ns", "BlobPayload", { eventPayload: 1 }, 21 satisfies BlobSchema] satisfies StaticSimpleSchema],
+        ],
+        [
+          3,
+          "ns",
+          "TextPayload",
+          0,
+          ["payload"],
+          [[0, "ns", "TextPayload", { eventPayload: 1 }, 0 satisfies StringSchema] satisfies StaticSimpleSchema],
+        ],
+        [
+          3,
+          "ns",
+          "CustomHeaders",
+          0,
+          ["payload", "header1", "header2", "header-date", "header-number", "header-boolean", "header-blob"],
+          [
+            [0, "ns", "BlobPayload", { eventPayload: 1 }, 21 satisfies BlobSchema] satisfies StaticSimpleSchema,
+            [0, "ns", "EventHeader", { eventHeader: 1 }, 0 satisfies StringSchema] satisfies StaticSimpleSchema,
+            [0, "ns", "EventHeader", { eventHeader: 1 }, 0 satisfies StringSchema] satisfies StaticSimpleSchema,
+
+            [
+              0,
+              "ns",
+              "EventHeader",
+              { eventHeader: 1 },
+              7 satisfies TimestampEpochSecondsSchema,
+            ] satisfies StaticSimpleSchema,
+            [0, "ns", "EventHeader", { eventHeader: 1 }, 1 satisfies NumericSchema] satisfies StaticSimpleSchema,
+            [0, "ns", "EventHeader", { eventHeader: 1 }, 2 satisfies BooleanSchema] satisfies StaticSimpleSchema,
+            [0, "ns", "EventHeader", { eventHeader: 1 }, 21 satisfies BlobSchema] satisfies StaticSimpleSchema,
+          ],
+        ],
+        [3, "ns", "NoOp", 0, [], []] satisfies StaticStructureSchema,
+      ],
+    ] satisfies StaticStructureSchema;
+
+    const eventStreamContainerSchema = [
+      3,
+      "ns",
+      "EventStreamContainer",
+      0,
+      // here the non-eventstream members form an initial-request
+      // or initial-response when present.
+      ["eventStreamMember", "dateMember", "blobMember"],
+      [eventStreamUnionSchema, 7 satisfies TimestampEpochSecondsSchema, 21 satisfies BlobSchema],
+    ] satisfies StaticStructureSchema;
+
+    describe("serialization", () => {
+      async function messageDeserializer(event: Record<string, EventMessage>): Promise<any> {
+        return event;
+      }
+
+      const eventStreamCallerInput = {
+        async *[Symbol.asyncIterator]() {
+          yield { A: { name: "a" } };
+          yield { B: { name: "b" } };
+          yield { C: { name: "c" } };
+          yield { $unknown: ["D", { name: "d" }] };
+          yield { Payload: { payload: new Uint8Array([0, 1, 2, 3, 4, 5, 6]) } };
+          yield { TextPayload: { payload: "beep boop" } };
+          yield {
+            CustomHeaders: {
+              payload: new Uint8Array([0, 1, 2, 3]),
+              header1: "h1",
+              header2: "h2",
+              "header-date": new Date(0),
+              "header-number": -2,
+              "header-boolean": false,
+              "header-blob": new Uint8Array([0, 1, 2, 3]),
+            },
+          };
+        },
+      };
+
+      const canonicalEvents = [
+        {
+          headers: {
+            ":event-type": { type: "string", value: "A" },
+            ":message-type": { type: "string", value: "event" },
+            ":content-type": { type: "string", value: "application/cbor" },
+          },
+          body: { name: "a" },
+        },
+        {
+          headers: {
+            ":event-type": { type: "string", value: "B" },
+            ":message-type": { type: "string", value: "event" },
+            ":content-type": { type: "string", value: "application/cbor" },
+          },
+          body: { name: "b" },
+        },
+        {
+          headers: {
+            ":event-type": { type: "string", value: "C" },
+            ":message-type": { type: "string", value: "event" },
+            ":content-type": { type: "string", value: "application/cbor" },
+          },
+          body: { name: "c" },
+        },
+        {
+          headers: {
+            ":event-type": { type: "string", value: "D" },
+            ":message-type": { type: "string", value: "event" },
+            ":content-type": { type: "string", value: "application/cbor" },
+          },
+          body: { name: "d" },
+        },
+        {
+          headers: {
+            ":event-type": { type: "string", value: "Payload" },
+            ":message-type": { type: "string", value: "event" },
+            ":content-type": { type: "string", value: "application/octet-stream" },
+          },
+          body: new Uint8Array([0, 1, 2, 3, 4, 5, 6]),
+        },
+        {
+          headers: {
+            ":event-type": { type: "string", value: "TextPayload" },
+            ":message-type": { type: "string", value: "event" },
+            ":content-type": { type: "string", value: "text/plain" },
+          },
+          body: "beep boop",
+        },
+        {
+          headers: {
+            ":event-type": { type: "string", value: "CustomHeaders" },
+            ":message-type": { type: "string", value: "event" },
+            ":content-type": { type: "string", value: "application/octet-stream" },
+            header1: { type: "string", value: "h1" },
+            header2: { type: "string", value: "h2" },
+            "header-boolean": {
+              type: "boolean",
+              value: false,
+            },
+            "header-date": {
+              type: "timestamp",
+              value: new Date(0),
+            },
+            "header-number": {
+              type: "integer",
+              value: -2,
+            },
+            "header-blob": {
+              type: "binary",
+              value: new Uint8Array([0, 1, 2, 3]),
+            },
+          },
+          body: new Uint8Array([0, 1, 2, 3]),
+        },
+      ];
+
+      /**
+       * Takes an outgoing request requestBody of event streams,
+       * collects it, and maps to the canonical object form.
+       */
+      async function collectTranslate(requestBody: any) {
+        const reparsed = impl.getEventStreamMarshaller().deserialize(requestBody, messageDeserializer);
+
+        const collect = [];
+        for await (const chunk of reparsed) {
+          collect.push(chunk);
+        }
+
+        return collect.map((item) => {
+          const object = Object.values(item)[0] as any;
+          return {
+            headers: object.headers,
+            body: cbor.deserialize(object.body),
+          };
+        });
+      }
+
+      it("serializes event streams", async () => {
+        const requestBody = await eventStreamSerde.serializeEventStream({
+          eventStream: eventStreamCallerInput,
+          requestSchema: NormalizedSchema.of(eventStreamContainerSchema),
+        });
+
+        expect(await collectTranslate(requestBody)).toEqual(canonicalEvents);
+      });
+
+      it("serializes event streams containing an initial-request", async () => {
+        const requestBody = await eventStreamSerde.serializeEventStream({
+          eventStream: eventStreamCallerInput,
+          requestSchema: NormalizedSchema.of(eventStreamContainerSchema),
+          initialRequest: {
+            dateMember: new Date(0),
+            blobMember: new Uint8Array([0, 1, 2, 3]),
+          },
+        });
+
+        expect(await collectTranslate(requestBody)).toEqual([
+          {
+            headers: {
+              ":event-type": { type: "string", value: "initial-request" },
+              ":message-type": { type: "string", value: "event" },
+              ":content-type": { type: "string", value: "application/cbor" },
+            },
+            body: {
+              blobMember: new Uint8Array([0, 1, 2, 3]),
+              dateMember: dateToTag(new Date(0)),
+            },
+          },
+          ...canonicalEvents,
+        ]);
+      });
+    });
+
+    describe("deserialization", () => {
+      /**
+       * Converts a canonical event to a JS object representation
+       * of an event stream event.
+       */
+      function messageSerializer(event: any): EventMessage {
+        const eventType = Object.keys(event)[0];
+        const data = event[eventType];
+
+        const headerKeys = Object.keys(data).filter((k) => k.startsWith("header"));
+        const headers = {
+          ":message-type": { type: "string", value: "event" },
+          ":event-type": { type: "string", value: eventType },
+          ":content-type": { type: "string", value: "application/cbor" },
+        } as any;
+
+        for (const key of headerKeys) {
+          const v = data[key];
+          if (v instanceof Date) {
+            headers[key] = {
+              type: "timestamp",
+              value: data[key],
+            };
+          } else if (typeof v === "boolean") {
+            headers[key] = {
+              type: "boolean",
+              value: data[key],
+            };
+          } else if (typeof v === "string") {
+            headers[key] = {
+              type: "string",
+              value: data[key],
+            };
+          } else if (typeof v === "number") {
+            headers[key] = {
+              type: "integer",
+              value: v,
+            };
+          } else if (v instanceof Uint8Array) {
+            headers[key] = {
+              type: "binary",
+              value: v,
+            };
+          } else {
+            throw new Error("unhandled type");
+          }
+
+          delete data[key];
+        }
+
+        const payload = data.payload;
+        if (payload) {
+          return {
+            headers,
+            body: typeof payload === "string" ? fromUtf8(payload) : payload,
+          };
+        }
+
+        if (eventType === "NoOp") {
+          return {
+            headers,
+            // simulate omitted structure body.
+            // not technically correct for the content-type, but pre-existing
+            // edge case.
+            body: new Uint8Array(),
+          };
+        }
+
+        return {
+          headers,
+          body: cbor.serialize(data),
+        };
+      }
+
+      const eventStreamMarshaller = impl.getEventStreamMarshaller();
+
+      const canonicalEvents = {
+        async *[Symbol.asyncIterator]() {
+          yield { A: { name: "a" } };
+          yield { B: { name: "b" } };
+          yield { C: { name: "c" } };
+          yield { D: { name: "d" } };
+          yield { Payload: { payload: new Uint8Array([0, 1, 2, 3, 4, 5, 6]) } };
+          yield { TextPayload: { payload: "boop beep" } };
+          yield {
+            CustomHeaders: {
+              payload: new Uint8Array([0, 1, 2, 3]),
+              header1: "h1",
+              header2: "h2",
+              "header-date": new Date(0),
+              "header-number": -2,
+              "header-boolean": false,
+              "header-blob": new Uint8Array([0, 1, 2, 3]),
+            },
+          };
+          yield {
+            NoOp: {},
+          };
+        },
+      };
+
+      const $unknownEvent = {
+        $unknown: {
+          D: {
+            headers: {
+              ":message-type": { type: "string", value: "event" },
+              ":event-type": { type: "string", value: "D" },
+              ":content-type": { type: "string", value: "application/cbor" },
+            },
+            body: Uint8Array.from(cbor.serialize({ name: "d" })),
+          },
+        },
+      };
+      void $unknownEvent;
+
+      async function collect(asyncIterable: AsyncIterable<any>): Promise<any[]> {
+        const collect = [];
+        for await (const event of asyncIterable) {
+          collect.push(event);
+        }
+        return collect;
+      }
+
+      it("deserializes event streams", async () => {
+        const response = new HttpResponse({
+          statusCode: 200,
+          body: eventStreamMarshaller.serialize(canonicalEvents, messageSerializer),
+        });
+
+        const asyncIterable = await eventStreamSerde.deserializeEventStream({
+          response,
+          responseSchema: NormalizedSchema.of(eventStreamContainerSchema),
+        });
+
+        expect(await collect(asyncIterable)).toEqual([
+          { A: { name: `a` } },
+          { B: { name: `b` } },
+          { C: { name: `c` } },
+          // todo(schema) getMessageUnmarshaller.ts must be patched to return unknown events.
+          // $unknownEvent,
+          { Payload: { payload: new Uint8Array([0, 1, 2, 3, 4, 5, 6]) } },
+          { TextPayload: { payload: "boop beep" } },
+          {
+            CustomHeaders: {
+              payload: new Uint8Array([0, 1, 2, 3]),
+              header1: "h1",
+              header2: "h2",
+              "header-boolean": false,
+              "header-date": new Date(0),
+              "header-number": -2,
+              "header-blob": new Uint8Array([0, 1, 2, 3]),
+            },
+          },
+          {
+            NoOp: {},
+          },
+        ]);
+      });
+
+      it("deserializes event streams containing an initial-response", async () => {
+        const response = new HttpResponse({
+          statusCode: 200,
+          body: eventStreamMarshaller.serialize(
+            {
+              async *[Symbol.asyncIterator]() {
+                yield {
+                  "initial-response": { dateMember: dateToTag(new Date(0)), blobMember: new Uint8Array([0, 1, 2, 3]) },
+                };
+                for await (const it of canonicalEvents) {
+                  yield it;
+                }
+              },
+            },
+            messageSerializer
+          ),
+        });
+
+        const initialResponseContainer = {} as any;
+
+        const asyncIterable = await eventStreamSerde.deserializeEventStream({
+          response,
+          responseSchema: NormalizedSchema.of(eventStreamContainerSchema),
+          initialResponseContainer,
+        });
+
+        expect(await collect(asyncIterable)).toEqual([
+          { A: { name: `a` } },
+          { B: { name: `b` } },
+          { C: { name: `c` } },
+          // todo(schema) getMessageUnmarshaller.ts must be patched to return unknown events.
+          // $unknownEvent,
+          { Payload: { payload: new Uint8Array([0, 1, 2, 3, 4, 5, 6]) } },
+          { TextPayload: { payload: "boop beep" } },
+          {
+            CustomHeaders: {
+              payload: new Uint8Array([0, 1, 2, 3]),
+              header1: "h1",
+              header2: "h2",
+              "header-boolean": false,
+              "header-date": new Date(0),
+              "header-number": -2,
+              "header-blob": new Uint8Array([0, 1, 2, 3]),
+            },
+          },
+          {
+            NoOp: {},
+          },
+        ]);
+
+        expect(initialResponseContainer).toEqual({
+          dateMember: new Date(0),
+          blobMember: new Uint8Array([0, 1, 2, 3]),
+        });
+      });
+
+      it("throws modeled exceptions as proper Error instances (not plain objects)", async () => {
+        // This test demonstrates the bug described in https://github.com/smithy-lang/smithy-typescript/issues/2169
+        // Event-stream modeled exceptions are thrown as plain objects instead of
+        // instances of the registered error class, breaking `instanceof` checks.
+
+        const errorNamespace = "ns.eventstream.test";
+
+        // Define and register an error class (mimics codegen output)
+        class MyStreamError extends Error {
+          public readonly $fault = "client" as const;
+          public reason: string = "";
+          constructor(opts: { message?: string } = {}) {
+            super(opts.message);
+            this.name = "MyStreamError";
+            Object.setPrototypeOf(this, MyStreamError.prototype);
+          }
+        }
+
+        const myStreamErrorSchema = [
+          -3,
+          errorNamespace,
+          "MyStreamError",
+          { error: "client" },
+          ["message", "reason"],
+          [0, 0],
+        ] satisfies StaticErrorSchema;
+
+        const registry = TypeRegistry.for(errorNamespace);
+        registry.registerError(myStreamErrorSchema, MyStreamError);
+
+        // Build a union schema that contains both a normal event and an error member
+        const errorUnionSchema = [
+          3,
+          errorNamespace,
+          "EventStreamWithErrors",
+          { streaming: 1 },
+          ["DataEvent", "MyStreamError"],
+          [[3, errorNamespace, "DataEvent", 0, ["value"], [0]] satisfies StaticStructureSchema, myStreamErrorSchema],
+        ] satisfies StaticStructureSchema;
+
+        const errorContainerSchema = [
+          3,
+          errorNamespace,
+          "ErrorEventStreamContainer",
+          0,
+          ["events"],
+          [errorUnionSchema],
+        ] satisfies StaticStructureSchema;
+
+        // Create a wire message with :message-type "exception"
+        // This is how the event stream codec delivers modeled exceptions.
+        function exceptionMessageSerializer(event: any): EventMessage {
+          const eventType = Object.keys(event)[0];
+          const data = event[eventType];
+
+          if (eventType === "__exception__") {
+            // Produce an exception frame
+            return {
+              headers: {
+                ":message-type": { type: "string", value: "exception" },
+                ":exception-type": { type: "string", value: data.type },
+                ":content-type": { type: "string", value: "application/cbor" },
+              },
+              body: cbor.serialize(data.body),
+            };
+          }
+
+          return {
+            headers: {
+              ":message-type": { type: "string", value: "event" },
+              ":event-type": { type: "string", value: eventType },
+              ":content-type": { type: "string", value: "application/cbor" },
+            },
+            body: cbor.serialize(data),
+          };
+        }
+
+        const eventsWithException = {
+          async *[Symbol.asyncIterator]() {
+            yield { DataEvent: { value: "hello" } };
+            yield {
+              __exception__: { type: "MyStreamError", body: { message: "something went wrong", reason: "timeout" } },
+            };
+          },
+        };
+
+        const response = new HttpResponse({
+          statusCode: 200,
+          body: eventStreamMarshaller.serialize(eventsWithException, exceptionMessageSerializer),
+        });
+
+        const asyncIterable = await eventStreamSerde.deserializeEventStream({
+          response,
+          responseSchema: NormalizedSchema.of(errorContainerSchema),
+        });
+
+        const collected: any[] = [];
+        let thrown: unknown;
+
+        try {
+          for await (const event of asyncIterable) {
+            collected.push(event);
+          }
+        } catch (e) {
+          thrown = e;
+        }
+
+        // The first event should have been yielded successfully
+        expect(collected).toEqual([{ DataEvent: { value: "hello" } }]);
+
+        // Verify something was thrown
+        expect(thrown).toBeDefined();
+
+        // The thrown value must be an instance of the registered error class.
+        expect(thrown).toBeInstanceOf(Error);
+        expect(thrown).toBeInstanceOf(MyStreamError);
+        expect((thrown as MyStreamError).message).toBe("something went wrong");
+        expect((thrown as MyStreamError).reason).toBe("timeout");
+        expect((thrown as MyStreamError).$fault).toBe("client");
+      });
+    });
+
+    describe("exception deserialization", () => {
+      it("throws modeled exceptions as instances of the registered error constructor", async () => {
+        // Define a modeled exception schema (StaticSchemaIdError = -3)
+        const modeledExceptionSchema = [
+          -3, // StaticSchemaIdError
+          "ns",
+          "ModeledException",
+          { error: "client" },
+          ["message", "code"],
+          [0, 0], // string schemas for members
+        ] as const;
+
+        // Define a union schema that includes the error member
+        const eventStreamUnionWithError = [
+          3,
+          "ns",
+          "EventStreamWithError",
+          { streaming: 1 },
+          ["DataEvent", "ModeledException"],
+          [[3, "ns", "DataEvent", 0, ["value"], [0]] as const, modeledExceptionSchema],
+        ] as const;
+
+        const containerSchema = [3, "ns", "Container", 0, ["stream"], [eventStreamUnionWithError]] as const;
+
+        // Create a modeled exception class
+        class ModeledException extends Error {
+          readonly code?: string;
+          constructor(opts: any = {}) {
+            super(opts.message ?? "");
+            this.name = "ModeledException";
+          }
+        }
+
+        // Register the exception in the TypeRegistry
+        const registry = TypeRegistry.for("ns");
+        registry.registerError(modeledExceptionSchema as any, ModeledException);
+
+        try {
+          // Serialize an exception event (message-type: exception, exception-type: ModeledException)
+          const exceptionBody = cbor.serialize({ message: "something went wrong", code: "LIMIT_EXCEEDED" });
+
+          const eventStreamMarshaller = impl.getEventStreamMarshaller();
+
+          // Create a raw event stream with an exception message
+          const exceptionEvent: any = {
+            async *[Symbol.asyncIterator]() {
+              yield {
+                headers: {
+                  ":message-type": { type: "string", value: "exception" },
+                  ":exception-type": { type: "string", value: "ModeledException" },
+                  ":content-type": { type: "string", value: "application/cbor" },
+                },
+                body: exceptionBody,
+              };
+            },
+          };
+
+          // Serialize and feed through the event stream serde
+          const serializedBody = eventStreamMarshaller.serialize(exceptionEvent, (event: any) => event);
+
+          const response = new HttpResponse({
+            statusCode: 200,
+            body: serializedBody,
+          });
+
+          const asyncIterable = await eventStreamSerde.deserializeEventStream({
+            response,
+            responseSchema: NormalizedSchema.of(containerSchema as any),
+          });
+
+          // Attempt to consume the stream — should throw
+          for await (const _event of asyncIterable) {
+            // should not reach here
+            expect.unreachable("Expected an exception to be thrown");
+          }
+          expect.unreachable("Expected an exception to be thrown");
+        } catch (thrown: any) {
+          // The thrown value should be an instance of the registered error constructor
+          expect(thrown).toBeInstanceOf(ModeledException);
+          expect(thrown).toBeInstanceOf(Error);
+          expect(thrown.name).toBe("ModeledException");
+          expect(thrown.message).toBe("something went wrong");
+          expect(thrown.code).toBe("LIMIT_EXCEEDED");
+          expect(thrown.$fault).toBe("client");
+        } finally {
+          // Clean up registry to avoid test pollution
+          registry.clear();
+        }
+      });
+
+      it("falls back to current behavior for unknown/unregistered exception types", async () => {
+        // Define a union schema WITHOUT the error member registered
+        const eventStreamUnionNoError = [
+          3,
+          "ns.fallback",
+          "EventStreamNoError",
+          { streaming: 1 },
+          ["DataEvent"],
+          [[3, "ns.fallback", "DataEvent", 0, ["value"], [0]] as const],
+        ] as const;
+
+        const containerSchema = [
+          3,
+          "ns.fallback",
+          "ContainerNoError",
+          0,
+          ["stream"],
+          [eventStreamUnionNoError],
+        ] as const;
+
+        // Serialize an exception event for an unknown exception type
+        const exceptionBody = cbor.serialize({ message: "unknown error occurred" });
+        const eventStreamMarshaller = impl.getEventStreamMarshaller();
+
+        const exceptionEvent: any = {
+          async *[Symbol.asyncIterator]() {
+            yield {
+              headers: {
+                ":message-type": { type: "string", value: "exception" },
+                ":exception-type": { type: "string", value: "UnknownException" },
+                ":content-type": { type: "string", value: "application/cbor" },
+              },
+              body: exceptionBody,
+            };
+          },
+        };
+
+        const serializedBody = eventStreamMarshaller.serialize(exceptionEvent, (event: any) => event);
+
+        const response = new HttpResponse({
+          statusCode: 200,
+          body: serializedBody,
+        });
+
+        try {
+          const asyncIterable = await eventStreamSerde.deserializeEventStream({
+            response,
+            responseSchema: NormalizedSchema.of(containerSchema as any),
+          });
+
+          for await (const _event of asyncIterable) {
+            expect.unreachable("Expected an exception to be thrown");
+          }
+          expect.unreachable("Expected an exception to be thrown");
+        } catch (thrown: any) {
+          // Unknown exceptions should still be thrown as Error instances with name set
+          expect(thrown).toBeInstanceOf(Error);
+          expect(thrown.name).toBe("UnknownException");
+        }
+      });
+    });
+  });
+
+  describe("initial-request serialization correctness", () => {
+    it("serializes initial-request string members as strings, not pre-encoded bytes", async () => {
+      // This test verifies that when raw values (not pre-serialized bytes) are
+      // passed as initialRequest, the CBOR serializer correctly encodes them as
+      // their proper types. This catches a regression where pre-serialized
+      // Uint8Array values were passed, causing strings to be double-encoded as blobs.
+      const cborCodec = new CborCodec();
+      const marshaller = new EventStreamMarshaller({ utf8Encoder: toUtf8, utf8Decoder: fromUtf8 });
+      const serde = new EventStreamSerde({
+        marshaller,
+        serializer: cborCodec.createSerializer(),
+        deserializer: cborCodec.createDeserializer(),
+        defaultContentType: "application/cbor",
+      });
+
+      // Schema with a string member and a streaming union member.
+      const streamingUnion: StaticStructureSchema = [
+        4,
+        "ns",
+        "Events",
+        { streaming: 1 },
+        ["alpha"],
+        [[3, "ns", "Alpha", 0, ["id"], [0 satisfies StringSchema]] satisfies StaticStructureSchema],
+      ] as any;
+      const containerSchema: StaticStructureSchema = [
+        3,
+        "ns",
+        "Container",
+        0,
+        ["sessionId", "eventStream"],
+        [0 satisfies StringSchema, [() => streamingUnion, 0]],
+      ];
+
+      const requestBody = await serde.serializeEventStream({
+        eventStream: (async function* () {})(),
+        requestSchema: NormalizedSchema.of(containerSchema),
+        initialRequest: {
+          sessionId: "my-session-value",
+        },
+      });
+
+      // Collect and decode the initial-request message.
+      const chunks: Uint8Array[] = [];
+      for await (const chunk of requestBody as AsyncIterable<Uint8Array>) {
+        chunks.push(chunk);
+      }
+      const fullBody = Buffer.concat(chunks);
+
+      // Read the first message (initial-request).
+      const totalLength = fullBody.readUInt32BE(0);
+      const codec = new EventStreamCodec(toUtf8, fromUtf8);
+      const firstMessage = codec.decode(fullBody.subarray(0, totalLength));
+
+      expect(firstMessage.headers[":event-type"]?.value).toBe("initial-request");
+
+      // Decode the CBOR payload and verify sessionId is a string, not bytes.
+      const decoded = cbor.deserialize(firstMessage.body);
+      expect(typeof decoded.sessionId).toBe("string");
+      expect(decoded.sessionId).toBe("my-session-value");
+    });
+  });
+});

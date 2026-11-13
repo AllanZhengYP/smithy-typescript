@@ -1,79 +1,250 @@
+/*
+ * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 package software.amazon.smithy.typescript.codegen;
 
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.equalTo;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.when;
+
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+import software.amazon.smithy.codegen.core.CodegenException;
 import software.amazon.smithy.model.Model;
+import software.amazon.smithy.model.knowledge.ServiceIndex;
 import software.amazon.smithy.model.node.Node;
 import software.amazon.smithy.model.node.ObjectNode;
+import software.amazon.smithy.model.shapes.ServiceShape;
 import software.amazon.smithy.model.shapes.ShapeId;
+import software.amazon.smithy.typescript.codegen.protocols.ProtocolPriorityConfig;
+import software.amazon.smithy.utils.MapUtils;
 
-import java.util.stream.Stream;
-
-import static org.hamcrest.MatcherAssert.assertThat;
-import static org.hamcrest.Matchers.equalTo;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-
+@ExtendWith(MockitoExtension.class)
 public class TypeScriptSettingsTest {
+
+    // these are mock protocol names.
+    ShapeId rpcv2Cbor = ShapeId.from("namespace#rpcv2Cbor");
+    ShapeId json1_0 = ShapeId.from("namespace#json1_0");
+    ShapeId json1_1 = ShapeId.from("namespace#json1_1");
+    ShapeId restJson1 = ShapeId.from("namespace#restJson1");
+    ShapeId restXml = ShapeId.from("namespace#restXml");
+    ShapeId query = ShapeId.from("namespace#query");
+    ShapeId serviceQuery = ShapeId.from("namespace#serviceQuery");
+    LinkedHashSet<ShapeId> protocolShapeIds = new LinkedHashSet<>(
+        List.of(json1_0, json1_1, restJson1, rpcv2Cbor, restXml, query, serviceQuery)
+    );
 
     @Test
     public void resolvesDefaultService() {
-        Model model = Model.assembler()
-                .addImport(getClass().getResource("simple-service.smithy"))
-                .assemble()
-                .unwrap();
-        TypeScriptSettings settings = TypeScriptSettings.from(model, Node.objectNodeBuilder()
+        Model model = Model.assembler().addImport(getClass().getResource("simple-service.smithy")).assemble().unwrap();
+        TypeScriptSettings settings = TypeScriptSettings.from(
+            model,
+            Node.objectNodeBuilder()
                 .withMember("package", Node.from("example"))
                 .withMember("packageVersion", Node.from("1.0.0"))
-                .build());
+                .build()
+        );
 
         assertThat(settings.getService(), equalTo(ShapeId.from("smithy.example#Example")));
     }
 
     @Test
-    public void defaultsToYarn() {
-        Model model = Model.assembler()
-                .addImport(getClass().getResource("simple-service.smithy"))
-                .assemble()
-                .unwrap();
-        TypeScriptSettings settings = TypeScriptSettings.from(model, Node.objectNodeBuilder()
+    public void resolvesServerModeToSsdkArtifactType() {
+        Model model = Model.assembler().addImport(getClass().getResource("simple-service.smithy")).assemble().unwrap();
+        TypeScriptSettings settings = TypeScriptSettings.fromWithModes(
+            model,
+            Node.objectNodeBuilder()
                 .withMember("package", Node.from("example"))
                 .withMember("packageVersion", Node.from("1.0.0"))
-                .build());
+                .withMember("modes", Node.fromStrings("server"))
+                .build()
+        );
+
+        assertEquals(TypeScriptSettings.ArtifactType.SSDK, settings.getArtifactType());
+    }
+
+    @Test
+    public void modeStringsAreCaseInsensitive() {
+        Model model = Model.assembler().addImport(getClass().getResource("simple-service.smithy")).assemble().unwrap();
+        TypeScriptSettings settings = TypeScriptSettings.fromWithModes(
+            model,
+            Node.objectNodeBuilder()
+                .withMember("package", Node.from("example"))
+                .withMember("packageVersion", Node.from("1.0.0"))
+                .withMember("modes", Node.fromStrings("CLIENT"))
+                .build()
+        );
+
+        assertEquals(TypeScriptSettings.ArtifactType.CLIENT, settings.getArtifactType());
+    }
+
+    @Test
+    public void rejectsUnknownModeString() {
+        Model model = Model.assembler().addImport(getClass().getResource("simple-service.smithy")).assemble().unwrap();
+        ObjectNode config = Node.objectNodeBuilder()
+            .withMember("package", Node.from("example"))
+            .withMember("packageVersion", Node.from("1.0.0"))
+            .withMember("modes", Node.fromStrings("browser"))
+            .build();
+
+        CodegenException e = assertThrows(
+            CodegenException.class,
+            () -> TypeScriptSettings.fromWithModes(model, config)
+        );
+        assertThat(e.getMessage(), containsString("Unsupported codegen mode"));
+    }
+
+    @Test
+    public void rejectsEmptyModesArray() {
+        Model model = Model.assembler().addImport(getClass().getResource("simple-service.smithy")).assemble().unwrap();
+        ObjectNode config = Node.objectNodeBuilder()
+            .withMember("package", Node.from("example"))
+            .withMember("packageVersion", Node.from("1.0.0"))
+            .withMember("modes", Node.arrayNode())
+            .build();
+
+        CodegenException e = assertThrows(
+            CodegenException.class,
+            () -> TypeScriptSettings.fromWithModes(model, config)
+        );
+        assertThat(e.getMessage(), containsString("At least one codegen mode"));
+    }
+
+    @Test
+    public void fixedArtifactSettingsRejectModes() {
+        Model model = Model.assembler().addImport(getClass().getResource("simple-service.smithy")).assemble().unwrap();
+        ObjectNode config = Node.objectNodeBuilder()
+            .withMember("package", Node.from("example"))
+            .withMember("packageVersion", Node.from("1.0.0"))
+            .withMember("modes", Node.fromStrings("client"))
+            .build();
+
+        CodegenException e = assertThrows(
+            CodegenException.class,
+            () -> TypeScriptSettings.from(model, config, TypeScriptSettings.ArtifactType.CLIENT)
+        );
+        assertThat(e.getMessage(), containsString("only supported by the unified"));
+    }
+
+    @Test
+    public void retainsCombinedModesUntilPluginDispatch() {
+        Model model = Model.assembler()
+            .addImport(getClass().getResource("simple-service.smithy"))
+            .assemble()
+            .unwrap();
+        TypeScriptSettings settings = TypeScriptSettings.fromWithModes(
+            model,
+            Node.objectNodeBuilder()
+                .withMember("service", Node.from("smithy.example#Example"))
+                .withMember("package", Node.from("example"))
+                .withMember("packageVersion", Node.from("1.0.0"))
+                .withMember("modes", Node.fromStrings("client", "types"))
+                .withMember("closure", Node.from("smithy.example#types"))
+                .build()
+        );
+
+        assertTrue(settings.generateClient());
+        assertTrue(settings.generateTypes());
+        assertFalse(settings.isTypesOnly());
+        assertEquals(TypeScriptSettings.ArtifactType.CLIENT, settings.getArtifactType());
+    }
+
+    @Test
+    public void typesModeRejectsServiceSetting() {
+        Model model = Model.assembler().addImport(getClass().getResource("simple-service.smithy")).assemble().unwrap();
+        ObjectNode config = Node.objectNodeBuilder()
+            .withMember("service", Node.from("smithy.example#Example"))
+            .withMember("package", Node.from("example"))
+            .withMember("packageVersion", Node.from("1.0.0"))
+            .withMember("modes", Node.fromStrings("types"))
+            .withMember("closure", Node.from("smithy.example#types"))
+            .build();
+
+        CodegenException e = assertThrows(
+            CodegenException.class,
+            () -> TypeScriptSettings.fromWithModes(model, config)
+        );
+        assertThat(e.getMessage(), containsString("'service' setting cannot be used"));
+    }
+
+    @Test
+    public void typesModeReadsTypeSettingsButNotServiceSettings() {
+        Model model = Model.assembler().addImport(getClass().getResource("simple-service.smithy")).assemble().unwrap();
+        TypeScriptSettings settings = TypeScriptSettings.fromWithModes(
+            model,
+            Node.objectNodeBuilder()
+                .withMember("package", Node.from("example"))
+                .withMember("packageVersion", Node.from("1.0.0"))
+                .withMember("modes", Node.fromStrings("types"))
+                .withMember("closure", Node.from("smithy.example#types"))
+                .withMember("requiredMemberMode", Node.from("strict"))
+                .withMember("createDefaultReadme", Node.from(true))
+                .withMember("useLegacyAuth", Node.from(true))
+                .build()
+        );
+
+        assertEquals(TypeScriptSettings.RequiredMemberMode.STRICT, settings.getRequiredMemberMode());
+        assertFalse(settings.createDefaultReadme());
+        assertFalse(settings.useLegacyAuth());
+    }
+
+    @Test
+    public void defaultsToYarn() {
+        Model model = Model.assembler().addImport(getClass().getResource("simple-service.smithy")).assemble().unwrap();
+        TypeScriptSettings settings = TypeScriptSettings.from(
+            model,
+            Node.objectNodeBuilder()
+                .withMember("package", Node.from("example"))
+                .withMember("packageVersion", Node.from("1.0.0"))
+                .build()
+        );
 
         assertEquals(TypeScriptSettings.PackageManager.YARN, settings.getPackageManager());
     }
 
     @Test
     public void canBeConfiguredToNpm() {
-        Model model = Model.assembler()
-                .addImport(getClass().getResource("simple-service.smithy"))
-                .assemble()
-                .unwrap();
-        TypeScriptSettings settings = TypeScriptSettings.from(model, Node.objectNodeBuilder()
+        Model model = Model.assembler().addImport(getClass().getResource("simple-service.smithy")).assemble().unwrap();
+        TypeScriptSettings settings = TypeScriptSettings.from(
+            model,
+            Node.objectNodeBuilder()
                 .withMember("package", Node.from("example"))
                 .withMember("packageVersion", Node.from("1.0.0"))
                 .withMember("packageManager", Node.from("npm"))
-                .build());
+                .build()
+        );
 
         assertEquals(TypeScriptSettings.PackageManager.NPM, settings.getPackageManager());
     }
 
-
     @ParameterizedTest
     @MethodSource("providePackageDescriptionTestCases")
-    void expectPackageDescriptionUpdatedByArtifactType(TypeScriptSettings.ArtifactType artifactType, String expectedDescription) {
-        Model model = Model.assembler()
-                .addImport(getClass().getResource("simple-service.smithy"))
-                .assemble()
-                .unwrap();
+    void expectPackageDescriptionUpdatedByArtifactType(
+        TypeScriptSettings.ArtifactType artifactType,
+        String expectedDescription
+    ) {
+        Model model = Model.assembler().addImport(getClass().getResource("simple-service.smithy")).assemble().unwrap();
 
         ObjectNode settings = Node.objectNodeBuilder()
-                .withMember("service", Node.from("smithy.example#Example"))
-                .withMember("package", Node.from("example"))
-                .withMember("packageVersion", Node.from("1.0.0"))
-                .build();
+            .withMember("service", Node.from("smithy.example#Example"))
+            .withMember("package", Node.from("example"))
+            .withMember("packageVersion", Node.from("1.0.0"))
+            .build();
 
         final TypeScriptSettings typeScriptSettings = TypeScriptSettings.from(model, settings, artifactType);
 
@@ -82,9 +253,265 @@ public class TypeScriptSettingsTest {
 
     private static Stream<Arguments> providePackageDescriptionTestCases() {
         return Stream.of(
-                Arguments.of(TypeScriptSettings.ArtifactType.SSDK, "example server"),
-                Arguments.of(TypeScriptSettings.ArtifactType.CLIENT, "example client")
+            Arguments.of(TypeScriptSettings.ArtifactType.SSDK, "example server"),
+            Arguments.of(TypeScriptSettings.ArtifactType.CLIENT, "example client")
         );
+    }
+
+    @Test
+    public void resolveServiceProtocolSelectJson(
+        @Mock Model model,
+        @Mock ServiceShape service,
+        @Mock ServiceIndex serviceIndex
+    ) {
+        TypeScriptSettings subject = new TypeScriptSettings();
+        when(model.getKnowledge(any(), any())).thenReturn(serviceIndex);
+        ShapeId serviceShapeId = ShapeId.from("namespace#Service");
+        when(service.toShapeId()).thenReturn(serviceShapeId);
+
+        // spec case 1.
+        when(serviceIndex.getProtocols(service)).thenReturn(MapUtils.of(rpcv2Cbor, null, json1_0, null));
+        ShapeId protocol = subject.resolveServiceProtocol(model, service, protocolShapeIds);
+        // JS customization has JSON at higher default priority than CBOR.
+        assertEquals(json1_0, protocol);
+    }
+
+    @Test
+    public void resolveServiceProtocolSelectOnlyOption(
+        @Mock Model model,
+        @Mock ServiceShape service,
+        @Mock ServiceIndex serviceIndex
+    ) {
+        TypeScriptSettings subject = new TypeScriptSettings();
+        when(model.getKnowledge(any(), any())).thenReturn(serviceIndex);
+        ShapeId serviceShapeId = ShapeId.from("namespace#Service");
+        when(service.toShapeId()).thenReturn(serviceShapeId);
+
+        // spec case 2.
+        when(serviceIndex.getProtocols(service)).thenReturn(MapUtils.of(rpcv2Cbor, null));
+        ShapeId protocol = subject.resolveServiceProtocol(model, service, protocolShapeIds);
+        assertEquals(rpcv2Cbor, protocol);
+    }
+
+    @Test
+    public void resolveServiceProtocolSelectJsonOverQueryAndCbor(
+        @Mock Model model,
+        @Mock ServiceShape service,
+        @Mock ServiceIndex serviceIndex
+    ) {
+        TypeScriptSettings subject = new TypeScriptSettings();
+        when(model.getKnowledge(any(), any())).thenReturn(serviceIndex);
+        ShapeId serviceShapeId = ShapeId.from("namespace#Service");
+        when(service.toShapeId()).thenReturn(serviceShapeId);
+
+        // spec case 3.
+        when(serviceIndex.getProtocols(service)).thenReturn(MapUtils.of(rpcv2Cbor, null, json1_0, null, query, null));
+        ShapeId protocol = subject.resolveServiceProtocol(model, service, protocolShapeIds);
+        // JS customization has JSON at higher default priority than CBOR.
+        assertEquals(json1_0, protocol);
+    }
+
+    @Test
+    public void resolveServiceProtocolSelectJsonOverQuery(
+        @Mock Model model,
+        @Mock ServiceShape service,
+        @Mock ServiceIndex serviceIndex
+    ) {
+        TypeScriptSettings subject = new TypeScriptSettings();
+        when(model.getKnowledge(any(), any())).thenReturn(serviceIndex);
+        ShapeId serviceShapeId = ShapeId.from("namespace#Service");
+        when(service.toShapeId()).thenReturn(serviceShapeId);
+
+        // spec case 4.
+        when(serviceIndex.getProtocols(service)).thenReturn(MapUtils.of(json1_0, null, query, null));
+        ShapeId protocol = subject.resolveServiceProtocol(model, service, protocolShapeIds);
+        assertEquals(json1_0, protocol);
+    }
+
+    @Test
+    public void resolveServiceProtocolSelectQueryWhenSingularOption(
+        @Mock Model model,
+        @Mock ServiceShape service,
+        @Mock ServiceIndex serviceIndex
+    ) {
+        TypeScriptSettings subject = new TypeScriptSettings();
+        when(model.getKnowledge(any(), any())).thenReturn(serviceIndex);
+        ShapeId serviceShapeId = ShapeId.from("namespace#Service");
+        when(service.toShapeId()).thenReturn(serviceShapeId);
+
+        // spec case 5.
+        when(serviceIndex.getProtocols(service)).thenReturn(MapUtils.of(query, null));
+        ShapeId protocol = subject.resolveServiceProtocol(model, service, protocolShapeIds);
+        assertEquals(query, protocol);
+    }
+
+    @Test
+    public void resolveServiceProtocolSelectServiceCustomPriority(
+        @Mock Model model,
+        @Mock ServiceShape service,
+        @Mock ServiceIndex serviceIndex
+    ) {
+        TypeScriptSettings subject = new TypeScriptSettings();
+        when(model.getKnowledge(any(), any())).thenReturn(serviceIndex);
+        ShapeId serviceShapeId = ShapeId.from("namespace#Service");
+        when(service.toShapeId()).thenReturn(serviceShapeId);
+
+        // service override, non-spec
+        when(serviceIndex.getProtocols(service)).thenReturn(
+            MapUtils.of(
+                json1_0,
+                null,
+                json1_1,
+                null,
+                restJson1,
+                null,
+                rpcv2Cbor,
+                null,
+                restXml,
+                null,
+                query,
+                null,
+                serviceQuery,
+                null
+            )
+        );
+        subject.setProtocolPriority(
+            new ProtocolPriorityConfig(
+                MapUtils.of(
+                    serviceShapeId,
+                    List.of(serviceQuery, rpcv2Cbor, json1_1, restJson1, restXml, query)
+                ),
+                null
+            )
+        );
+        ShapeId protocol = subject.resolveServiceProtocol(model, service, protocolShapeIds);
+        assertEquals(serviceQuery, protocol);
+    }
+
+    @Test
+    public void resolveServiceProtocolSelectDefaultCustomPriority(
+        @Mock Model model,
+        @Mock ServiceShape service,
+        @Mock ServiceIndex serviceIndex
+    ) {
+        TypeScriptSettings subject = new TypeScriptSettings();
+        when(model.getKnowledge(any(), any())).thenReturn(serviceIndex);
+        ShapeId serviceShapeId = ShapeId.from("namespace#Service");
+        when(service.toShapeId()).thenReturn(serviceShapeId);
+
+        // global default override
+        when(serviceIndex.getProtocols(service)).thenReturn(
+            MapUtils.of(
+                json1_0,
+                null,
+                json1_1,
+                null,
+                restJson1,
+                null,
+                rpcv2Cbor,
+                null,
+                restXml,
+                null,
+                query,
+                null,
+                serviceQuery,
+                null
+            )
+        );
+        subject.setProtocolPriority(
+            new ProtocolPriorityConfig(null, List.of(rpcv2Cbor, json1_1, restJson1, restXml, query))
+        );
+        ShapeId protocol = subject.resolveServiceProtocol(model, service, protocolShapeIds);
+        assertEquals(rpcv2Cbor, protocol);
+    }
+
+    @Test
+    public void parseProtocolPriorityJson() {
+        Model model = Model.assembler().addImport(getClass().getResource("simple-service.smithy")).assemble().unwrap();
+
+        ObjectNode settings = Node.objectNodeBuilder()
+            .withMember("service", Node.from("smithy.example#Example"))
+            .withMember("package", Node.from("example"))
+            .withMember("packageVersion", Node.from("1.0.0"))
+            .withMember(
+                "serviceProtocolPriority",
+                Node.parse(
+                    """
+                    {
+                      "namespace#Service1": ["namespace#Protocol1", "namespace#Protocol2"],
+                      "namespace#Service2": ["namespace#Protocol2", "namespace#Protocol1"]
+                    }
+                    """
+                )
+            )
+            .withMember(
+                "defaultProtocolPriority",
+                Node.parse(
+                    """
+                    ["namespace#Protocol3", "namespace#Protocol4"]
+                    """
+                )
+            )
+            .build();
+
+        final TypeScriptSettings subject = TypeScriptSettings.from(model, settings);
+
+        assertEquals(
+            ShapeId.from("namespace#Protocol2"),
+            subject.getProtocolPriority().getProtocolPriority(ShapeId.from("namespace#Service1")).get(1)
+        );
+        assertEquals(
+            ShapeId.from("namespace#Protocol2"),
+            subject.getProtocolPriority().getProtocolPriority(ShapeId.from("namespace#Service2")).get(0)
+        );
+        assertEquals(
+            ShapeId.from("namespace#Protocol4"),
+            subject.getProtocolPriority().getProtocolPriority(ShapeId.from("namespace#Service5")).get(1)
+        );
+    }
+
+    @Test
+    public void isolatedModulesDefaultsToFalse() {
+        Model model = Model.assembler().addImport(getClass().getResource("simple-service.smithy")).assemble().unwrap();
+        TypeScriptSettings settings = TypeScriptSettings.from(
+            model,
+            Node.objectNodeBuilder()
+                .withMember("package", Node.from("example"))
+                .withMember("packageVersion", Node.from("1.0.0"))
+                .build()
+        );
+
+        assertEquals(false, settings.isolatedModules());
+    }
+
+    @Test
+    public void isolatedModulesCanBeSetToTrue() {
+        Model model = Model.assembler().addImport(getClass().getResource("simple-service.smithy")).assemble().unwrap();
+        TypeScriptSettings settings = TypeScriptSettings.from(
+            model,
+            Node.objectNodeBuilder()
+                .withMember("package", Node.from("example"))
+                .withMember("packageVersion", Node.from("1.0.0"))
+                .withMember(
+                    "tsconfig",
+                    Node.objectNodeBuilder()
+                        .withMember(
+                            "types",
+                            Node.objectNodeBuilder()
+                                .withMember(
+                                    "compilerOptions",
+                                    Node.objectNodeBuilder()
+                                        .withMember("isolatedModules", Node.from(true))
+                                        .build()
+                                )
+                                .build()
+                        )
+                        .build()
+                )
+                .build()
+        );
+
+        assertEquals(true, settings.isolatedModules());
     }
 
     @Test
